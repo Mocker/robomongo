@@ -17,8 +17,19 @@
 
 namespace Robomongo
 {
-    const char * rolesText[CreateUserDialog::RolesCount] = {"read","readWrite","dbAdmin","userAdmin","clusterAdmin","readAnyDatabase","readWriteAnyDatabase","userAdminAnyDatabase","dbAdminAnyDatabase"}; 
-    const QSize CreateUserDialog::minimumSize = QSize(400,200);
+    const char * rolesText[CreateUserDialog::RolesCount] = {
+        "read",
+        "readWrite",
+        "dbAdmin",
+        "userAdmin",
+        "clusterAdmin",
+        "readAnyDatabase",
+        "readWriteAnyDatabase",
+        "userAdminAnyDatabase",
+        "dbAdminAnyDatabase"
+    };
+
+    const QSize CreateUserDialog::minimumSize = QSize(400, 200);
 
     bool containsWord(const std::string& sentence, const std::string& word)
     {
@@ -31,7 +42,7 @@ namespace Robomongo
                 if (pos) {
                     isFirstAlpha = isalpha(sentence[pos - 1]);
                 }
-                if (!isFirstAlpha&&!isLastAlpha)
+                if (!isFirstAlpha && !isLastAlpha)
                     return true;
             }
             pos++;
@@ -39,13 +50,11 @@ namespace Robomongo
         return false;
     }
 
-    CreateUserDialog::CreateUserDialog(const QStringList &databases,const QString &serverName,
+    CreateUserDialog::CreateUserDialog(const QStringList &databases, const QString &serverName,
                                        const QString &database, const MongoUser &user,
                                        QWidget *parent) : QDialog(parent),
         _user(user)
     {
-        VERIFY(!user.version() < MongoUser::minimumSupportedVersion);
-
         setWindowTitle("Add User");
         setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint); // Remove help button (?)
         setMinimumSize(minimumSize);
@@ -57,27 +66,28 @@ namespace Robomongo
         hline->setFrameShape(QFrame::HLine);
         hline->setFrameShadow(QFrame::Sunken);
 
-        _userNameLabel= new QLabel("Name:");
+        _userNameLabel = new QLabel("Name:");
         _userNameEdit = new QLineEdit();
         _userNameEdit->setText(QtUtils::toQString(user.name()));
-        _userPassLabel= new QLabel("Password:");
+        _userPassLabel = new QLabel("Password:");
         _userPassEdit = new QLineEdit();
         _userPassEdit->setEchoMode(QLineEdit::Password);
         _userSourceLabel = new QLabel("UserSource:");
         _userSourceComboBox = new QComboBox();
-        _userSourceComboBox->addItems(QStringList() << "" << databases); //setText(QtUtils::toQString(user.userSource()));
+        _userSourceComboBox->addItems(QStringList() << databases); //setText(QtUtils::toQString(user.userSource()));    
+        _userSourceComboBox->setCurrentIndex(databases.indexOf(database));
         utils::setCurrentText(_userSourceComboBox, QtUtils::toQString(user.userSource()));
 
         QGridLayout *gridRoles = new QGridLayout();
-        MongoUser::RoleType userRoles = user.role();
-        for (unsigned i=0; i<RolesCount; ++i)
+        MongoUser::RolesVector userRoles = user.roles();
+        for (unsigned i = 0; i<RolesCount; ++i)
         {
             int row = i%3;
             int col = i/3;
-            _rolesArray[i] = new QCheckBox(rolesText[i],this);
-            MongoUser::RoleType::const_iterator it = std::find(userRoles.begin(),userRoles.end(),rolesText[i]);
-            _rolesArray[i]->setChecked(it!=userRoles.end());      
-            gridRoles->addWidget(_rolesArray[i],row,col);
+            _rolesArray[i] = new QCheckBox(rolesText[i], this);
+            MongoUser::RolesVector::const_iterator it = std::find(userRoles.begin(), userRoles.end(), rolesText[i]);
+            _rolesArray[i]->setChecked(it!= userRoles.end());
+            gridRoles->addWidget(_rolesArray[i], row, col);
         }
 
         QDialogButtonBox *buttonBox = new QDialogButtonBox(this);
@@ -120,7 +130,6 @@ namespace Robomongo
         QWidget *parent) : QDialog(parent),
         _user(user)
     {
-        VERIFY(user.version() < MongoUser::minimumSupportedVersion);
         setWindowTitle("Add User");
         setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint); // Remove help button (?)
         setMinimumSize(minimumSize);
@@ -132,7 +141,7 @@ namespace Robomongo
         hline->setFrameShape(QFrame::HLine);
         hline->setFrameShadow(QFrame::Sunken);
 
-        _userNameLabel= new QLabel("Name:");
+        _userNameLabel = new QLabel("Name:");
         _userNameEdit = new QLineEdit();
         _userNameEdit->setText(QtUtils::toQString(user.name()));
         _userPassLabel= new QLabel("Password:");
@@ -187,10 +196,8 @@ namespace Robomongo
             if (username.empty() || pass.empty())
                 return;
 
-            std::string hash = MongoUtils::buildPasswordHash(username, pass);
-
             _user.setName(username);
-            _user.setPasswordHash(hash);
+            _user.setPassword(pass);
             _user.setReadOnly(_readOnlyCheckBox->isChecked());
         }
         else {
@@ -202,27 +209,17 @@ namespace Robomongo
             if (userSource.empty() && pass.empty())
                 return;
 
-            if (!userSource.empty() && !pass.empty()) {
-                QMessageBox::warning(this, "Invalid input", "The UserSource field and the Password field are mutually exclusive. The document cannot contain both.\n");
-                return;
-            }
-
-            std::string hash;
-            if (!pass.empty()) {
-                hash = MongoUtils::buildPasswordHash(username, pass);
-            }
-
-            _user.setPasswordHash(hash);
             _user.setName(username);        
+            _user.setPassword(pass);
             _user.setUserSource(userSource);
 
-            MongoUser::RoleType roles;
+            MongoUser::RolesVector roles;
             for (unsigned i = 0; i < RolesCount; ++i) {
                 if (_rolesArray[i]->isChecked()) {
                     roles.push_back(rolesText[i]);
                 }
             }
-            _user.setRole(roles);
+            _user.setRoles(roles);
         }
 
         QDialog::accept();

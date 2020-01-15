@@ -4,6 +4,7 @@
 
 #include "robomongo/core/Core.h"
 #include "robomongo/core/domain/MongoQueryInfo.h"
+#include "robomongo/core/domain/MongoAggregateInfo.h"
 #include "robomongo/core/Enums.h"
 #include <vector>
 
@@ -25,11 +26,20 @@ namespace Robomongo
 
     public:
         typedef QWidget BaseClass;
-        OutputItemContentWidget(OutputWidget *out, ViewMode viewMode, MongoShell *shell, const QString &text, double secs, QWidget *parent = NULL);
-        OutputItemContentWidget(OutputWidget *out, ViewMode viewMode, MongoShell *shell, const QString &type, const std::vector<MongoDocumentPtr> &documents, const MongoQueryInfo &queryInfo, double secs, QWidget *parent = NULL);
+        OutputItemContentWidget(ViewMode viewMode, MongoShell *shell, const QString &text, double secs,
+                                bool multipleResults, bool tabbedResults, bool firstItem, bool lastItem,
+                                AggrInfo aggrInfo, QWidget *parent);
+
+        OutputItemContentWidget(ViewMode viewMode, MongoShell *shell, const QString &type,
+                                const std::vector<MongoDocumentPtr> &documents, 
+                                const MongoQueryInfo &queryInfo, double secs, bool multipleResults,
+                                bool tabbedResults, bool firstItem, bool lastItem, AggrInfo aggrInfo,
+                                QWidget *parent);
         int _initialSkip;
         int _initialLimit;
-        void update(const MongoQueryInfo &inf,const std::vector<MongoDocumentPtr> &documents);
+        void updateWithInfo(const MongoQueryInfo &inf, const std::vector<MongoDocumentPtr> &documents);
+        void updateWithInfo(const AggrInfo &aggrInfo, const std::vector<MongoDocumentPtr> &documents);
+        void update(const std::vector<MongoDocumentPtr> &documents, int skip, int batchSize);
         bool isTextModeSupported() const { return _isTextModeSupported; }
         bool isTreeModeSupported() const { return _isTreeModeSupported; }
         bool isCustomModeSupported() const { return _isCustomModeSupported; }
@@ -38,6 +48,11 @@ namespace Robomongo
 
         void refreshOutputItem();
         void markUninitialized();
+
+        void applyDockUndockSettings(bool isDocking) const;
+        void toggleOrientation(Qt::Orientation orientation) const;
+
+        const OutputWidget* outputWidget() const { return _outputWidget; }
 
     Q_SIGNALS:
         void restoredSize();
@@ -56,7 +71,7 @@ namespace Robomongo
         void paging_leftClicked(int skip, int limit);      
 
     private:
-        void setup(double secs);
+        void setup(double secs, bool multipleResults, bool tabbedResults, bool firstItem, bool lastItem);
         FindFrame *configureLogText();
         BsonTreeModel *configureModel();
 
@@ -70,13 +85,14 @@ namespace Robomongo
         QString _type; // type of request
         std::vector<MongoDocumentPtr> _documents;
         MongoQueryInfo _queryInfo;
+        AggrInfo _aggrInfo;
 
         QStackedWidget *_stack;
         JsonPrepareThread *_thread;
 
         MongoShell *_shell;
         OutputItemHeaderWidget *_header;
-        OutputWidget *_out;
+        OutputWidget *_outputWidget;
         bool _isTextModeSupported;
         bool _isTreeModeSupported;
         bool _isTableModeSupported;

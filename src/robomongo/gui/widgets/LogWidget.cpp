@@ -15,12 +15,12 @@ namespace Robomongo
     {
         _logTextEdit->setReadOnly(true);
         _logTextEdit->setContextMenuPolicy(Qt::CustomContextMenu);
-        VERIFY(connect(_logTextEdit,SIGNAL(customContextMenuRequested(const QPoint&)),this,SLOT(showContextMenu(const QPoint &))));
+        VERIFY(connect(_logTextEdit, SIGNAL(customContextMenuRequested(const QPoint&)), this, SLOT(showContextMenu(const QPoint &))));
         QHBoxLayout *hlayout = new QHBoxLayout;
-        hlayout->setContentsMargins(0,0,0,0);
+        hlayout->setContentsMargins(0, 0, 0, 0);
         hlayout->addWidget(_logTextEdit);
         _clear = new QAction("Clear All", this);
-        VERIFY(connect(_clear, SIGNAL(triggered()),_logTextEdit, SLOT(clear())));
+        VERIFY(connect(_clear, SIGNAL(triggered()), _logTextEdit, SLOT(clear())));
         setLayout(hlayout);      
     }
 
@@ -34,13 +34,38 @@ namespace Robomongo
         delete menu;
     }
 
-    void LogWidget::addMessage(const QString &message, mongo::LogLevel level)
+    void LogWidget::addMessage(const QString &message, mongo::logger::LogSeverity level)
     {
+        // Print time
         QTime time = QTime::currentTime();
-        QDate date = QDate::currentDate();
-        //_logTextEdit->appendHtml(QString(level == mongo::LL_ERROR ? "<font color=red>%1 %2</font>" : "<font color=black>%1 %2</font>").arg(time.toString("h:mm:ss AP:")).arg(message.toHtmlEscaped()));
-        _logTextEdit->setTextColor(level == mongo::LL_ERROR ? QColor(Qt::red):QColor(Qt::black));
-        _logTextEdit->append(date.toString("yyyy-MM-dd ") + time.toString("hh:mm:ss: ") + message);
+        _logTextEdit->moveCursor (QTextCursor::End);
+        _logTextEdit->setTextColor(QColor("#aaaaaa"));
+        _logTextEdit->insertPlainText(time.toString("h:mm:ss AP") + "\t");
+
+        // Print message
+        _logTextEdit->moveCursor (QTextCursor::End);
+
+        // Nice color for the future: "#CD9800" :)
+
+        QColor textColor = QColor(Qt::black);
+
+        if (level == mongo::logger::LogSeverity::Error())
+            textColor = QColor("#CD0000");
+        else if (level == mongo::logger::LogSeverity::Log())
+            textColor = QColor("#777777");
+        else if (level == mongo::logger::LogSeverity::Warning())
+            textColor = QColor("#CD9800");
+
+        _logTextEdit->setTextColor(textColor);
+
+        const int maxLength = 500;
+        if (message.length() <= maxLength) {
+            _logTextEdit->insertPlainText(message.trimmed() + "\n");
+        } else {
+            _logTextEdit->insertPlainText(QString("(truncated) ") + message.left(maxLength).trimmed() + "...\n");
+        }
+
+        // Scroll to the bottom
         QScrollBar *sb = _logTextEdit->verticalScrollBar();
         sb->setValue(sb->maximum());
     }

@@ -5,10 +5,13 @@
 #include <QLabel>
 #include <QCheckBox>
 #include <QPushButton>
+#include <QComboBox>
 
 #include "robomongo/core/settings/ConnectionSettings.h"
 #include "robomongo/core/settings/CredentialSettings.h"
 #include "robomongo/core/utils/QtUtils.h"
+#include "robomongo/gui/GuiRegistry.h"
+#include "robomongo/gui/utils/GuiConstants.h"
 
 namespace Robomongo
 {
@@ -16,8 +19,8 @@ namespace Robomongo
         _settings(settings)
     {
         _databaseNameDescriptionLabel = new QLabel(
-            "<nobr>The <code>admin</code> database is unique in MongoDB.</nobr> Users with normal access "
-            "to the <code>admin</code> database have read and write access to <b>all "
+            "<nobr>The admin database is unique in MongoDB.</nobr> Users with normal access "
+            "to the admin database have read and write access to <b>all "
             "databases</b>.");
 
         _databaseNameDescriptionLabel->setWordWrap(true);
@@ -27,17 +30,33 @@ namespace Robomongo
 
         _userName = new QLineEdit();
         _userNameLabel = new QLabel("User Name");
+        _mechanismLabel = new QLabel("Auth Mechanism");
         _userPassword = new QLineEdit();
         _userPassword->setEchoMode(QLineEdit::Password);
         _userPasswordLabel = new QLabel("Password");
         _databaseName = new QLineEdit("admin");
         _databaseNameLabel = new QLabel("Database");
 
+        _mechanismComboBox = new QComboBox();
+        _mechanismComboBox->addItem("SCRAM-SHA-1");
+        _mechanismComboBox->addItem("SCRAM-SHA-256");
+        _mechanismComboBox->addItem("MONGODB-CR");
+
         _useAuth = new QCheckBox("Perform authentication");
         _useAuth->setStyleSheet("margin-bottom: 7px");
         VERIFY(connect(_useAuth, SIGNAL(toggled(bool)), this, SLOT(authChecked(bool))));
 
-        _echoModeButton = new QPushButton("Show");
+        _echoModeButton = new QPushButton;
+        _echoModeButton->setIcon(GuiRegistry::instance().hideIcon());
+#ifdef Q_OS_MAC
+        _echoModeButton->setMaximumWidth(50);
+#else
+        _echoModeButton->setMinimumWidth(50);
+#endif
+        // Attempt to fix the issue for Windows High DPI button height is slightly taller than other widgets 
+#ifdef Q_OS_WIN
+        _echoModeButton->setMaximumHeight(HighDpiConstants::WIN_HIGH_DPI_BUTTON_HEIGHT);
+#endif
         VERIFY(connect(_echoModeButton, SIGNAL(clicked()), this, SLOT(toggleEchoMode())));
 
         _useAuth->setChecked(_settings->hasEnabledPrimaryCredential());
@@ -48,23 +67,23 @@ namespace Robomongo
             _userName->setText(QtUtils::toQString(primaryCredential->userName()));
             _userPassword->setText(QtUtils::toQString(primaryCredential->userPassword()));
             _databaseName->setText(QtUtils::toQString(primaryCredential->databaseName()));
+            _mechanismComboBox->setCurrentText(QtUtils::toQString(primaryCredential->mechanism()));
         }
 
-        QGridLayout *_authLayout = new QGridLayout;
-        _authLayout->addWidget(_useAuth,                      0, 0, 1, 3);
-        _authLayout->addWidget(_databaseNameLabel,            1, 0);
-        _authLayout->addWidget(_databaseName,                 1, 1, 1, 2);
-        _authLayout->addWidget(_databaseNameDescriptionLabel, 2, 1, 1, 2);
-        _authLayout->addWidget(_userNameLabel,                3, 0);
-        _authLayout->addWidget(_userName,                     3, 1, 1, 2);
-        _authLayout->addWidget(_userPasswordLabel,            4, 0);
-        _authLayout->addWidget(_userPassword,                 4, 1);
-        _authLayout->addWidget(_echoModeButton,               4, 2);
-        _authLayout->setAlignment(Qt::AlignTop);
-
-        QVBoxLayout *mainLayout = new QVBoxLayout;
-        mainLayout->addLayout(_authLayout);
-        setLayout(mainLayout);
+        QGridLayout *authLayout = new QGridLayout;
+        authLayout->addWidget(_useAuth,                      0, 0, 1, 3);
+        authLayout->addWidget(_databaseNameLabel,            1, 0);
+        authLayout->addWidget(_databaseName,                 1, 1, 1, 2);
+        authLayout->addWidget(_databaseNameDescriptionLabel, 2, 1, 1, 2);
+        authLayout->addWidget(_userNameLabel,                3, 0);
+        authLayout->addWidget(_userName,                     3, 1, 1, 2);
+        authLayout->addWidget(_userPasswordLabel,            4, 0);
+        authLayout->addWidget(_userPassword,                 4, 1);
+        authLayout->addWidget(_echoModeButton,               4, 2);
+        authLayout->addWidget(_mechanismLabel,               5, 0);
+        authLayout->addWidget(_mechanismComboBox,            5, 1, 1, 2);
+        authLayout->setAlignment(Qt::AlignTop);
+        setLayout(authLayout);
     }
 
     void ConnectionAuthTab::accept()
@@ -82,14 +101,23 @@ namespace Robomongo
         credential->setUserName(QtUtils::toStdString(_userName->text()));
         credential->setUserPassword(QtUtils::toStdString(_userPassword->text()));
         credential->setDatabaseName(QtUtils::toStdString(_databaseName->text()));
+        credential->setMechanism(QtUtils::toStdString(_mechanismComboBox->currentText()));
         _settings->addCredential(credential);
+    }
+
+    void ConnectionAuthTab::setAuthTab(QString const db, QString const username, QString const pwd)
+    {
+        _useAuth->setChecked(true);
+        _databaseName->setText(db);
+        _userName->setText(username);
+        _userPassword->setText(pwd);
     }
 
     void ConnectionAuthTab::toggleEchoMode()
     {
         bool isPassword = _userPassword->echoMode() == QLineEdit::Password;
         _userPassword->setEchoMode(isPassword ? QLineEdit::Normal: QLineEdit::Password);
-        _echoModeButton->setText(isPassword ? "Hide": "Show");
+        _echoModeButton->setIcon(isPassword ? GuiRegistry::instance().showIcon() : GuiRegistry::instance().hideIcon());
     }
 
     void ConnectionAuthTab::authChecked(bool checked)
@@ -102,6 +130,9 @@ namespace Robomongo
         _userPassword->setDisabled(!checked);
         _userPasswordLabel->setDisabled(!checked);
         _echoModeButton->setDisabled(!checked);
+
+        _mechanismLabel->setDisabled(!checked);
+        _mechanismComboBox->setDisabled(!checked);
 
         if (checked)
             _databaseName->setFocus();

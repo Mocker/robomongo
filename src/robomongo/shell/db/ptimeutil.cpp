@@ -35,13 +35,13 @@
 
 namespace
 {
-    int getInt( const std::string &timebuf, std::string::size_type &index, int numberOfChar,bool &isSuccessfull )
+    int getInt( const std::string &timebuf, std::string::size_type &index, int numberOfChar, bool &isSuccessfull )
     {
         int nextN=0;
         char buf[10]={0};
         isSuccessfull = numberOfChar < 9;
         assert(isSuccessfull);		
-        while( nextN < numberOfChar && isSuccessfull) {
+        while ( nextN < numberOfChar && isSuccessfull) {
             isSuccessfull = index < timebuf.length() && isdigit( timebuf[index] );     
             assert(isSuccessfull);			
             buf[nextN]=timebuf[index];
@@ -100,7 +100,7 @@ namespace miutil
         unsigned short year = d.year();
         char buf[64] = {0};
 
-        sprintf( buf, "%s, %02d %s %04d %02d:%02d:%02d GMT", day, d.day().as_number(), mon, year,t.hours(), t.minutes(), t.seconds() );
+        sprintf( buf, "%s, %02d %s %04d %02d:%02d:%02d GMT", day, d.day().as_number(), mon, year, t.hours(), t.minutes(), t.seconds() );
 
         return buf;
     }
@@ -121,7 +121,7 @@ namespace miutil
         if( !rfc1123 )
             return boost::posix_time::ptime( boost::date_time::not_a_date_time );
 
-        if ( sscanf( rfc1123,"%3s, %02d %3s %04d %02d:%02d:%02d %3s", sday, &day, smon, &year,
+        if ( sscanf( rfc1123, "%3s, %02d %3s %04d %02d:%02d:%02d %3s", sday, &day, smon, &year,
             &h, &m, &s, gmt) !=8 ) 
             return boost::posix_time::ptime( boost::date_time::not_a_date_time );
 
@@ -203,18 +203,29 @@ namespace miutil
         if( !isLocalFormat ){
             sprintf( buf, "%04d-%02d-%02d%c%02d:%02d:%02d.%03dZ", 
                 static_cast<int>(d.year()), d.month().as_number(), d.day().as_number(), sep,
-                t.hours(), t.minutes(), t.seconds(),(static_cast<int64_t>(t.total_milliseconds()))%1000 );
+                t.hours(), t.minutes(), t.seconds(), (static_cast<int>(t.total_milliseconds()))%1000 );
         }
         else{
-            boost::posix_time::ptime timeP(d,t);       
+            boost::posix_time::ptime timeP(d, t);
             time_t rawtime;
             time ( &rawtime );
+
             struct tm *ptm = std::gmtime ( &rawtime );
+            int utcD = ptm->tm_mday;
             int utcH = ptm->tm_hour;
             int utcM = ptm->tm_min;
+
             struct tm *timeinfo = std::localtime (&rawtime);
             int diffH = timeinfo->tm_hour - utcH;
+            
+            // Time zone calculation
+            if (timeinfo->tm_mday < utcD && diffH > 0)
+                diffH -= 24;
+            else if (timeinfo->tm_mday > utcD && diffH < 0)
+                diffH += 24;
+
             int diffM = timeinfo->tm_min - utcM;
+
             boost::posix_time::time_duration diffT = boost::posix_time::time_duration(diffH, diffM, 0);
             timeP += diffT;
 
@@ -222,11 +233,11 @@ namespace miutil
             t = timeP.time_of_day();
 
             char utc_buff[8]={0};
-            sprintf(utc_buff,diffT.hours()>0?"+%02d:%02d":"%03d:%02d",diffT.hours(),abs(diffM));
-            sprintf( buf, "%04d-%02d-%02d%c%02d:%02d:%02d.%03d", 
+            sprintf(utc_buff, (diffT.hours() >= 0) ? "+%02d:%02d" : "%03d:%02d", diffT.hours(), abs(diffM));
+            sprintf(buf, "%04d-%02d-%02d%c%02d:%02d:%02d.%03d",
                 static_cast<int>(d.year()), d.month().as_number(), d.day().as_number(), sep,
-                t.hours(), t.minutes(), t.seconds(),(static_cast<int64_t>(t.total_milliseconds()))%1000);
-            strcat(buf,utc_buff);
+                t.hours(), t.minutes(), t.seconds(), (static_cast<int>(t.total_milliseconds()))%1000);
+            strcat(buf, utc_buff);
         }
 
         return buf;   
@@ -235,7 +246,7 @@ namespace miutil
     boost::posix_time::ptime ptimeFromIsoString( const std::string &isoTime)
     {
         bool isSuccessfull=false;
-        return ptimeFromIsoString(isoTime,isSuccessfull);
+        return ptimeFromIsoString(isoTime, isSuccessfull);
     }
 
     boost::posix_time::ptime ptimeFromIsoString( const std::string &isoTime, bool &isSuccessfull)
@@ -339,12 +350,12 @@ namespace miutil
 
         try{
             boost::gregorian::date date(def[0].number, def[1].number, def[2].number);
-            boost::posix_time::time_duration td(def[3].number, def[4].number, def[5].number,def[6].number*1000);
+            boost::posix_time::time_duration td(def[3].number, def[4].number, def[5].number, def[6].number*1000);
             boost::posix_time::ptime pt(date, td);
             td = boost::posix_time::time_duration(hourOffset, minuteOffset, 0);
             return pt - td;
         }
-        catch(const std::out_of_range &ex)
+        catch(const std::out_of_range &)
         {
             isSuccessfull = false;
             return boost::posix_time::ptime();

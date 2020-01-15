@@ -4,6 +4,8 @@
 
 QT_BEGIN_NAMESPACE
 class QLineEdit;
+class QCheckBox;
+class QPushButton;
 QT_END_NAMESPACE
 
 namespace Robomongo
@@ -16,10 +18,25 @@ namespace Robomongo
 
     public:
         ConnectionAdvancedTab(ConnectionSettings *settings);
-        QLineEdit *_defaultDatabaseName;
         void accept();
+        void setDefaultDb(const QString& defaultDb);
+
+    /* --- Disabling unfinished export URI connection string feature
+    private Q_SLOTS :
+        void on_generateButton_clicked();
+        void on_copyButton_clicked();
+        void on_includePasswordsCheckBox_toggle(bool checked);
+    */
 
     private:
+        QLineEdit *_defaultDatabaseName;
+
+        /* --- Disabling unfinished export URI connection string feature
+        QLineEdit *_uriString;
+        QCheckBox *_includePasswordCheckBox;
+        QPushButton *_copyButton;
+        */
+
         ConnectionSettings *_settings;
     };
 }

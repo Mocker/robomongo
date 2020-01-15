@@ -33,12 +33,13 @@ namespace Robomongo
         _close->setIcon(QIcon(":/robomongo/icons/close_2_16x16.png"));
         _close->setToolButtonStyle(Qt::ToolButtonIconOnly);
         _close->setIconSize(QSize(16, 16));
+        _close->hide(); // We do not need close button because ESC works
+
         _findLine->setAlignment(Qt::AlignLeft | Qt::AlignAbsolute);
 
         QHBoxLayout *layout = new QHBoxLayout();
-        layout->setContentsMargins(6, 0, 6, 0);
-        layout->setSpacing(4);
-        layout->addWidget(_close);
+        layout->setContentsMargins(2, 0, 6, 0);
+        layout->setSpacing(7);
         layout->addWidget(_findLine);
         layout->addWidget(_next);
         layout->addWidget(_prev);
@@ -50,8 +51,8 @@ namespace Robomongo
         QVBoxLayout *mainLayout = new QVBoxLayout();
         mainLayout->setContentsMargins(0, 0, 0, 0);
         mainLayout->setSpacing(0);
-        mainLayout->addWidget(_scin);
-        mainLayout->addWidget(_findPanel);
+        mainLayout->addWidget(_scin, 1);
+        mainLayout->addWidget(_findPanel, 0, Qt::AlignBottom);
         setLayout(mainLayout);
 
         _findPanel->hide();
@@ -71,14 +72,17 @@ namespace Robomongo
         bool isFocusScin = _scin->isActiveWindow();
         bool isShowFind = _findPanel->isVisible();
         if (Qt::Key_Escape == keyEvent->key() && isFocusScin && isShowFind) {
+            // Hide & Show of Scintilla widget solves problem of UI blinking
+            _scin->hide();
             _findPanel->hide();
             _scin->setFocus();
+            _scin->show();
             return keyEvent->accept();
         } else if (Qt::Key_Return == keyEvent->key() && (keyEvent->modifiers() & Qt::ShiftModifier) && isFocusScin && isShowFind) {
             goToPrevElement();
         } else if (Qt::Key_Return == keyEvent->key() && isFocusScin && isShowFind) {
             goToNextElement();
-        } else if (((keyEvent->modifiers() & Qt::ControlModifier) && keyEvent->key()==Qt::Key_F) && isFocusScin) {
+        } else if (((keyEvent->modifiers() & Qt::ControlModifier) && keyEvent->key() == Qt::Key_F) && isFocusScin) {
             _findPanel->show();
             _findLine->setFocus();
             _findLine->selectAll();
@@ -122,7 +126,7 @@ namespace Robomongo
                 _scin->ensureCursorVisible(); 
             }
             else {
-                QMessageBox::warning(this, tr("Search"),tr("The specified text was not found."));
+                QMessageBox::warning(this, tr("Search"), tr("The specified text was not found."));
             }            
         }
     }

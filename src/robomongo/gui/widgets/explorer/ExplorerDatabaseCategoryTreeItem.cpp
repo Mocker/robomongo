@@ -6,6 +6,7 @@
 #include "robomongo/gui/dialogs/FunctionTextEditor.h"
 #include "robomongo/gui/dialogs/CreateUserDialog.h"
 #include "robomongo/gui/widgets/explorer/ExplorerDatabaseTreeItem.h"
+#include "robomongo/gui/dialogs/CreateCollectionDialog.h"
 #include "robomongo/gui/dialogs/CreateDatabaseDialog.h"
 
 #include "robomongo/core/settings/ConnectionSettings.h"
@@ -26,8 +27,8 @@ namespace
 namespace Robomongo
 {
 
-    ExplorerDatabaseCategoryTreeItem::ExplorerDatabaseCategoryTreeItem(ExplorerDatabaseTreeItem *databaseItem,ExplorerDatabaseCategory category) :
-        BaseClass(databaseItem) ,_category(category)
+    ExplorerDatabaseCategoryTreeItem::ExplorerDatabaseCategoryTreeItem(ExplorerDatabaseTreeItem *databaseItem, ExplorerDatabaseCategory category) :
+        BaseClass(databaseItem), _category(category)
     {
         if (_category == Collections) {
             QAction *createCollection = new QAction("Create Collection...", this);
@@ -135,7 +136,7 @@ namespace Robomongo
     {
         ExplorerDatabaseTreeItem *databaseItem = ExplorerDatabaseCategoryTreeItem::databaseItem();
         if (databaseItem) {
-            openDatabaseShell(databaseItem->database(), "db.system.users.find()");
+            openDatabaseShell(databaseItem->database(), "db.getUsers()");
         }
     }
 
@@ -153,18 +154,18 @@ namespace Robomongo
         if (!databaseItem)
             return;
 
-        CreateDatabaseDialog dlg(QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()),
-            QtUtils::toQString(databaseItem->database()->name()), QString(), treeWidget());
-        dlg.setWindowTitle("Create Collection");
-        dlg.setOkButtonText("&Create");
-        dlg.setInputLabelText("Collection Name:");
+        const float dbVersion = databaseItem->database()->server()->version();
+        const std::string& engineName = databaseItem->database()->server()->getStorageEngineType();
+        const QString& serverName = QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress());
+        const QString& dbName = QtUtils::toQString(databaseItem->database()->name());
+
+        CreateCollectionDialog dlg(serverName, dbVersion, engineName, dbName, QString(), treeWidget());
         int result = dlg.exec();
         if (result != QDialog::Accepted)
             return;
-
-        databaseItem->database()->createCollection(QtUtils::toStdString(dlg.databaseName()));
-        // refresh list of databases
-        databaseItem->expandCollections();
+        std::string collectionName = QtUtils::toStdString(dlg.getCollectionName());
+        databaseItem->database()->createCollection(collectionName, 
+            dlg.getSizeInputValue(), dlg.isCapped(), dlg.getMaxDocNumberInputValue(), dlg.getExtraOptions());
     }
 
     void ExplorerDatabaseCategoryTreeItem::ui_addUser()
@@ -173,26 +174,25 @@ namespace Robomongo
         if (!databaseItem)
             return;
 
-        float version = databaseItem->database()->server()->version();
-        CreateUserDialog *dlg = NULL;
+        std::unique_ptr<CreateUserDialog> dlg = nullptr;
 
+        float const version = databaseItem->database()->server()->version();
         if (version < MongoUser::minimumSupportedVersion) {
-            dlg = new CreateUserDialog(QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()),
-                QtUtils::toQString(databaseItem->database()->name()), MongoUser(version), treeWidget());
+            dlg.reset(new CreateUserDialog(
+                QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()),
+                QtUtils::toQString(databaseItem->database()->name()), MongoUser(version), treeWidget()));
         }
         else {
-            dlg = new CreateUserDialog(databaseItem->database()->server()->getDatabasesNames(), QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()),
-            QtUtils::toQString(databaseItem->database()->name()), MongoUser(version), treeWidget());
+            dlg.reset(new CreateUserDialog(databaseItem->database()->server()->getDatabasesNames(), 
+                QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()),
+                QtUtils::toQString(databaseItem->database()->name()), MongoUser(version), treeWidget()));
         }
 
-        int result = dlg->exec();
-        if (result != QDialog::Accepted)
+        if (dlg->exec() != QDialog::Accepted)
             return;
 
         MongoUser user = dlg->user();
-        databaseItem->database()->createUser(user, false);
-        // refresh list of users
-        databaseItem->expandUsers();
+        databaseItem->database()->createUser(user);
     }
 
     void ExplorerDatabaseCategoryTreeItem::ui_addFunction()
@@ -201,28 +201,27 @@ namespace Robomongo
         if (!databaseItem)
             return;
 
-        FunctionTextEditor dlg(QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()), QtUtils::toQString(databaseItem->database()->name()), MongoFunction());
+        FunctionTextEditor dlg(
+            QtUtils::toQString(databaseItem->database()->server()->connectionRecord()->getFullAddress()), 
+            QtUtils::toQString(databaseItem->database()->name()), MongoFunction());
+
         dlg.setWindowTitle("Create Function");
         dlg.setCode(
             "function() {\n"
             "    // write your code here\n"
             "}");
-        dlg.setCursorPosition(1, 4);
-        int result = dlg.exec();
-        if (result != QDialog::Accepted)
+        
+        if (dlg.exec() != QDialog::Accepted)
             return;
 
         MongoFunction function = dlg.function();
         databaseItem->database()->createFunction(function);
-        // refresh list of functions
-        databaseItem->expandFunctions();
     }
 
     void ExplorerDatabaseCategoryTreeItem::ui_refreshCollections()
     {
         ExplorerDatabaseTreeItem *databaseItem = ExplorerDatabaseCategoryTreeItem::databaseItem();
-        if (databaseItem) {
+        if (databaseItem) 
             databaseItem->expandCollections();
-        }
     }
 }

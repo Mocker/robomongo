@@ -19,6 +19,25 @@ namespace Robomongo
 
     public:
         /**
+        * @brief Database storage engine type
+        */
+        struct StorageEngineType
+        {
+            static const std::string WIRED_TIGER;
+            static const std::string MMAPV1;
+        };
+
+        /**
+        * @brief MongoDB version
+        */
+        struct DBVersion 
+        {
+            static const float MONGODB_2_6;
+            static const float MONGODB_3_0;
+            static const float MONGODB_3_2;
+        };
+
+        /**
          * @brief MongoDatabase
          * @param server: pointer to parent MongoServer
          */
@@ -37,14 +56,14 @@ namespace Robomongo
 
         void loadFunctions();
 
-        void createCollection(const std::string &collection);
+        void createCollection(const std::string &collection, long long size, bool capped, int maxDocNum, const mongo::BSONObj& extraOptions);
         void dropCollection(const std::string &collection);
         void renameCollection(const std::string &collection, const std::string &newCollection);
         void duplicateCollection(const std::string &collection, const std::string &newCollection);
         void copyCollection(MongoServer *server, const std::string &sourceDatabase, const std::string &collection);
 
-        void createUser(const MongoUser &user, bool overwrite);
-        void dropUser(const mongo::OID &id);
+        void createUser(const MongoUser &user);
+        void dropUser(std::string const& userName);
 
         void createFunction(const MongoFunction &fun);
         void updateFunction(const std::string &name, const MongoFunction &fun);
@@ -64,11 +83,19 @@ namespace Robomongo
         void handle(LoadCollectionNamesResponse *event);
         void handle(LoadUsersResponse *event);
         void handle(LoadFunctionsResponse *event);
+        void handle(CreateFunctionResponse *event);
         void handle(CreateUserResponse *event);
+        void handle(CreateCollectionResponse *event);
+        void handle(DropCollectionResponse *event);
+        void handle(DropFunctionResponse *event);
+        void handle(DropUserResponse *event);
+        void handle(RenameCollectionResponse *event);
+        void handle(DuplicateCollectionResponse *event);
 
     private:
         void clearCollections();
         void addCollection(MongoCollection *collection);
+        void handleIfReplicaSetUnreachable(Event *event);
 
     private:
         MongoServer *_server;
@@ -86,6 +113,9 @@ namespace Robomongo
             Event(sender),
             collections(list) { }
 
+        MongoDatabaseCollectionListLoadedEvent(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
+
         std::vector<MongoCollection *> collections;
     };
 
@@ -97,6 +127,9 @@ namespace Robomongo
             Event(sender),
             _users(list),
             _database(database) {}
+
+        MongoDatabaseUsersLoadedEvent(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
 
         std::vector<MongoUser> users() const { return _users; }
         MongoDatabase *database() const { return _database; }
@@ -114,6 +147,9 @@ namespace Robomongo
             Event(sender),
             _functions(list),
             _database(database) {}
+
+        MongoDatabaseFunctionsLoadedEvent(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
 
         std::vector<MongoFunction> functions() const { return _functions; }
         MongoDatabase *database() const { return _database; }

@@ -2,63 +2,70 @@
 
 #include <QDialog>
 #include <QIcon>
-#include <QThread>
-QT_BEGIN_NAMESPACE
+
 class QLabel;
 class QMovie;
-QT_END_NAMESPACE
 
 namespace Robomongo
 {
+    struct ConnectionEstablishedEvent;
+    class ConnectionFailedEvent;
     class ConnectionSettings;
+    class MongoServer;
 
     class ConnectionDiagnosticDialog : public QDialog
     {
         Q_OBJECT
     public:
-        typedef QDialog BaseClass;
-        static const QSize dialogSize;        
         ConnectionDiagnosticDialog(ConnectionSettings *connection, QWidget *parent = 0);
+        ~ConnectionDiagnosticDialog();
+
+        bool continueExec() const { return _continueExec; }
 
     protected Q_SLOTS:
-        void connectionStatus(QString error, bool connected);
-        void authStatus(QString error, bool authed);
-        void completed();
+        void handle(ConnectionEstablishedEvent *event);
+        void handle(ConnectionFailedEvent *event);
+        void errorLinkActivated(const QString &link);
 
     private:
-        ConnectionSettings *_connection;
+
+        enum State 
+        {
+            InitialState,
+            CompletedState,
+            FailedState,
+            NotPerformedState
+        };
+
+        void sshStatus(State state);
+        void connectionStatus(State state);
+        void authStatus(State state);
+        void listStatus(State state);
+
+        ConnectionSettings *_connSettings;
         QIcon _yesIcon;
         QIcon _noIcon;
-        QIcon _waitIcon;
+        QIcon _questionIcon;
         QMovie *_loadingMovie;
 
         QPixmap _yesPixmap;
         QPixmap _noPixmap;
+        QPixmap _questionPixmap;
 
+        QLabel *_sshIconLabel;
+        QLabel *_sshLabel;
         QLabel *_connectionIconLabel;
         QLabel *_connectionLabel;
         QLabel *_authIconLabel;
         QLabel *_authLabel;
+        QLabel *_listIconLabel;  // List database names
+        QLabel *_listLabel;
 
-        bool _connectionStatusReceived;
-        bool _authStatusReceived;
-    };
+        QLabel *_viewErrorLink;
+        std::string _lastErrorMessage;
 
-    class ConnectionDiagnosticThread : public QThread
-    {
-        Q_OBJECT
-    public:
-        ConnectionDiagnosticThread(ConnectionSettings *connection);
-
-    Q_SIGNALS:
-        void connectionStatus(QString error, bool connected);
-        void authStatus(QString error, bool authed);
-        void completed();
-
-    protected:
-        void run();
-
-    private:
-        ConnectionSettings *_connection;
+        MongoServer *_server;
+        int _serverHandle;
+        bool _continueExec;
     };
 }

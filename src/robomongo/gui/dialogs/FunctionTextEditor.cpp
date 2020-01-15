@@ -66,6 +66,8 @@ namespace Robomongo
         layout->addWidget(_queryText);
         layout->addLayout(bottomlayout);
         setLayout(layout);
+
+        _nameEdit->setFocus();
     }
 
     void FunctionTextEditor::setCursorPosition(int line, int column)
@@ -97,7 +99,7 @@ namespace Robomongo
         const QFont &textFont = GuiRegistry::instance().font();
         QsciLexerJavaScript *javaScriptLexer = new JSLexer(this);
         javaScriptLexer->setFont(textFont);        
-        _queryText->sciScintilla()->setBraceMatching(QsciScintilla::StrictBraceMatch);
+        _queryText->sciScintilla()->setAppropriateBraceMatching();
         _queryText->sciScintilla()->setFont(textFont);
         _queryText->sciScintilla()->setPaper(QColor(255, 0, 0, 127));
         _queryText->sciScintilla()->setLexer(javaScriptLexer);

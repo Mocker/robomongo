@@ -23,21 +23,27 @@ namespace Robomongo
 
     public:
         SshTunnelTab(ConnectionSettings *settings);
-        void accept();
-        bool isSshSupported() const;
+        bool accept();
+
+        /**
+        * @return true if use SSH checkbox is checked, false otherwise
+        */
+        bool sshEnabled() const;
 
     private Q_SLOTS:
-        void sshSupportStateChange(int val);
+        void sshSupportStateChange(int checked);
+        void askForPasswordStateChanged(int checked);
         void securityChange(const QString& val);
         void setPrivateFile();
         void togglePasswordEchoMode();
         void togglePassphraseEchoMode();
 
     private:
-        SSHInfo::SupportedAuthenticationMetods selectedAuthMethod();
-        
+        void setPasswordFieldsEnabled(bool enabled);
+
     private:        
         QCheckBox *_sshSupport;
+        QCheckBox *_askForPassword;
         QLineEdit *_sshHostName;
         QLineEdit *_userName;
         QLineEdit *_sshPort;

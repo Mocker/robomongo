@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <vector>
+#include <robomongo/core/events/MongoEvents.h>
 
 #include "robomongo/core/domain/ScriptInfo.h"
 
@@ -12,9 +13,12 @@ namespace Robomongo
     class MongoCollection;
     class MongoShell;
     class MongoDatabase;
+    class EstablishSshConnectionResponse;
+    class LogEvent;
+
     namespace detail
     {
-                /**
+        /**
          * @brief Builds single collection query (i.e. db.my_col.find()) from
          *  string that doesn't contain "db.my_col." prefix.
          *
@@ -43,8 +47,9 @@ namespace Robomongo
          * @brief Creates and opens new server connection.
          * @param connection: ConnectionSettings, that will be owned by MongoServer.
          * @param visible: should this server be visible in UI (explorer) or not.
+         * @return Succeeded or not
          */
-        MongoServer *openServer(ConnectionSettings *connection, bool visible);
+        bool openServer(ConnectionSettings *connection, ConnectionType type);
 
         /**
          * @brief Closes MongoServer connection and frees all resources, owned
@@ -55,18 +60,22 @@ namespace Robomongo
         /**
          * @brief Open new shell based on specified collection
          */
-        MongoShell *openShell(MongoCollection *collection,const QString &filePathToSave=QString());
+        void openShell(MongoCollection *collection, const QString &filePathToSave = QString());
 
-        MongoShell *openShell(MongoServer *server, const QString &script, const std::string &dbName = std::string(),
+        void openShell(MongoServer *server, const QString &script, const std::string &dbName = std::string(),
                               bool execute = true, const QString &shellName = QString(),
-                              const CursorPosition &cursorPosition = CursorPosition(),const QString &file=QString());
+                              const CursorPosition &cursorPosition = CursorPosition(), const QString &file = QString());
 
-        MongoShell *openShell(MongoDatabase *database, const QString &script,
+        void openShell(MongoDatabase *database, const QString &script,
                               bool execute = true, const QString &shellName = QString(),
-                              const CursorPosition &cursorPosition = CursorPosition(),const QString &filePathToSave=QString());
+                              const CursorPosition &cursorPosition = CursorPosition(), const QString &filePathToSave = QString());
 
-        MongoShell *openShell(ConnectionSettings *connection, const ScriptInfo &scriptInfo);
-        MongoServersContainerType getServers() const {return _servers; };
+        /**
+        * @brief Open new shell using explorer's MongoServer (ExplorerServerTreeItem's _server)
+        */
+        void openShell(MongoServer* server, ConnectionSettings* connSettings, const ScriptInfo &scriptInfo);
+
+        MongoServersContainerType getServers() const { return _servers; };
 
         /**
          * @brief Closes MongoShell and frees all resources, owned by specified MongoShell.
@@ -74,20 +83,40 @@ namespace Robomongo
          */
         void closeShell(MongoShell *shell);
 
+        void fireConnectionFailedEvent(int serverHandle, ConnectionType type, std::string errormsg, ConnectionFailedEvent::Reason reason);
+
+        int getLastServerHandle() const { return _lastServerHandle; };
+
+    public Q_SLOTS:
+        void handle(EstablishSshConnectionResponse *event);
+        void handle(ListenSshConnectionResponse *event);
+        void handle(LogEvent *event);
+
     private:
+        MongoServer *openServerInternal(ConnectionSettings* connSettings, ConnectionType type);
+        MongoServer *continueOpenServer(int serverHandle, ConnectionSettings* connSettings, ConnectionType type, int localport = 0);
+
         /**
-         * @brief MongoServers, owned by this App.
+        * @brief Create prompt dialog to enter SSL PEM key passphrase and save passphrase into SSL settings
+        * @param connection Pointer to active connection settings
+        * @return true on success, false otherwise
+        */
+        bool askSslPassphrasePromptDialog(ConnectionSettings *connSettings) const;
+
+        /**
+         * MongoServers, owned by this App.
          */
         MongoServersContainerType _servers;
 
         /**
-         * @brief MongoShells, owned by this App.
+         * MongoShells, owned by this App.
          */
         MongoShellsContainerType _shells;
 
-        /**
-         * @brief EventBus
-         */
         EventBus *const _bus;
+
+        // Increase monotonically when new MongoServer is created
+        // Never decreases.
+        int _lastServerHandle;
     };
 }

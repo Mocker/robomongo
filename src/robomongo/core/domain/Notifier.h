@@ -11,16 +11,18 @@ QT_END_NAMESPACE
 
 namespace Robomongo
 {
+    class MainWindow;
     class MongoShell;
     class BsonTreeItem;
     class InsertDocumentResponse;
+    struct RemoveDocumentResponse;
 
     namespace detail
     {
-        bool isSimpleType(BsonTreeItem *item);
+        bool isSimpleType(BsonTreeItem const *item);
         bool isObjectIdType(BsonTreeItem *item);
         bool isMultiSelection(const QModelIndexList &indexes);
-        bool isDocumentType(BsonTreeItem *item);
+        bool isDocumentType(BsonTreeItem const *item);
         QModelIndexList uniqueRows(QModelIndexList indexes, bool returnSuperParents = false);
     }
 
@@ -44,9 +46,10 @@ namespace Robomongo
         void initMenu(QMenu *const menu, BsonTreeItem *const item);
         void initMultiSelectionMenu(QMenu *const menu);
 
-        void deleteDocuments(std::vector<BsonTreeItem*> items, bool force);
+        void deleteDocuments(std::vector<BsonTreeItem*> const& items, bool force);
+        void handleDeleteCommand();
 
-    public Q_SLOTS: 
+    public Q_SLOTS:
         void onDeleteDocument();
         void onDeleteDocuments();
         void onEditDocument();
@@ -56,14 +59,23 @@ namespace Robomongo
         void onCopyTimestamp();
         void onCopyJson();
         void handle(InsertDocumentResponse *event);
+        void handle(RemoveDocumentResponse *event);
+
+    private Q_SLOTS:
+        void onCopyNameDocument();
+        void onCopyPathDocument();
 
     private:
+        MainWindow* mainWindow() const;
+
         QAction *_deleteDocumentAction;
         QAction *_deleteDocumentsAction;
         QAction *_editDocumentAction;
         QAction *_viewDocumentAction;
         QAction *_insertDocumentAction;
         QAction *_copyValueAction;
+        QAction *_copyValueNameAction;
+        QAction *_copyValuePathAction;
         QAction *_copyTimestampAction;
         QAction *_copyJsonAction;
         const MongoQueryInfo _queryInfo;

@@ -7,6 +7,7 @@
 #include "robomongo/core/settings/SettingsManager.h"
 #include "robomongo/core/utils/QtUtils.h"
 #include "robomongo/core/domain/MongoShell.h"
+#include "robomongo/core/domain/MongoAggregateInfo.h"
 
 #include "robomongo/gui/widgets/workarea/OutputWidget.h"
 #include "robomongo/gui/widgets/workarea/OutputItemHeaderWidget.h"
@@ -23,7 +24,10 @@
 
 namespace Robomongo
 {
-    OutputItemContentWidget::OutputItemContentWidget(OutputWidget *out, ViewMode viewMode, MongoShell *shell, const QString &text, double secs, QWidget *parent) :
+    OutputItemContentWidget::OutputItemContentWidget(ViewMode viewMode, MongoShell *shell, 
+                                                     const QString &text, double secs, bool multipleResults, 
+                                                     bool tabbedResults, bool firstItem, bool lastItem, 
+                                                     AggrInfo aggrInfo, QWidget *parent) :
         BaseClass(parent),
         _textView(NULL),
         _bsonTreeview(NULL),
@@ -40,16 +44,23 @@ namespace Robomongo
         _isFirstPartRendered(false),
         _text(text),
         _shell(shell),
+        _outputWidget(dynamic_cast<OutputWidget*>(parentWidget())),
         _initialSkip(0),
         _initialLimit(0),
-        _out(out),
         _mod(NULL),
-        _viewMode(viewMode)
+        _viewMode(viewMode),
+        _aggrInfo(aggrInfo)
     {
-        setup(secs);
+        setup(secs, multipleResults, tabbedResults, firstItem, lastItem);
     }
 
-    OutputItemContentWidget::OutputItemContentWidget(OutputWidget *out, ViewMode viewMode, MongoShell *shell, const QString &type, const std::vector<MongoDocumentPtr> &documents, const MongoQueryInfo &queryInfo, double secs, QWidget *parent) :
+    OutputItemContentWidget::OutputItemContentWidget(ViewMode viewMode, MongoShell *shell, 
+                                                     const QString &type, 
+                                                     const std::vector<MongoDocumentPtr> &documents, 
+                                                     const MongoQueryInfo &queryInfo, double secs, 
+                                                     bool multipleResults, bool tabbedResults,
+                                                     bool firstItem, bool lastItem, AggrInfo aggrInfo,
+                                                     QWidget *parent) :
         BaseClass(parent),
         _textView(NULL),
         _bsonTreeview(NULL),
@@ -70,28 +81,36 @@ namespace Robomongo
         _shell(shell),
         _initialSkip(queryInfo._skip),
         _initialLimit(queryInfo._limit),
-        _out(out),
+        _outputWidget(dynamic_cast<OutputWidget*>(parentWidget())),
         _mod(NULL),
-        _viewMode(viewMode)
+        _viewMode(viewMode),
+        _aggrInfo(aggrInfo)
     {
-        setup(secs);
+        setup(secs, multipleResults, tabbedResults, firstItem, lastItem);
     }
 
-    void OutputItemContentWidget::setup(double secs)
+    void OutputItemContentWidget::setup(double secs, bool multipleResults, bool tabbedResults,
+                                        bool firstItem, bool lastItem)
     {      
         setContentsMargins(0, 0, 0, 0);
-        _header = new OutputItemHeaderWidget(this);       
+        _header = new OutputItemHeaderWidget(this, multipleResults, tabbedResults, firstItem, lastItem);
 
         if (_queryInfo._info.isValid()) {
             _header->setCollection(QtUtils::toQString(_queryInfo._info._ns.collectionName()));
             _header->paging()->setBatchSize(_queryInfo._batchSize);
             _header->paging()->setSkip(_queryInfo._skip);
-            if(!_queryInfo._limit){
-            _queryInfo._limit=50;
-            }
+            if (!_queryInfo._limit)
+                _queryInfo._limit = 50;
+        }
+        else if (_aggrInfo.isValid) {
+            _initialLimit = 0;
+            _initialSkip = 0;
+            _header->setCollection(QtUtils::toQString(_aggrInfo.collectionName));
+            _header->paging()->setBatchSize(_aggrInfo.batchSize);
+            _header->paging()->setSkip(_aggrInfo.skip);
         }
 
-        _header->setTime(QString("%1 sec.").arg(secs));
+        _header->setTime(QString("%1 sec.").arg(secs, 0, 'g', 3));
 
         QVBoxLayout *layout = new QVBoxLayout();
         layout->setContentsMargins(0, 0, 0, 0);
@@ -102,9 +121,9 @@ namespace Robomongo
         setLayout(layout);
         configureModel();
 
-        VERIFY(connect(_header->paging(), SIGNAL(refreshed(int,int)), this, SLOT(refresh(int,int))));        
-        VERIFY(connect(_header->paging(), SIGNAL(leftClicked(int,int)), this, SLOT(paging_leftClicked(int,int))));
-        VERIFY(connect(_header->paging(), SIGNAL(rightClicked(int,int)), this, SLOT(paging_rightClicked(int,int))));
+        VERIFY(connect(_header->paging(), SIGNAL(refreshed(int, int)), this, SLOT(refresh(int, int))));
+        VERIFY(connect(_header->paging(), SIGNAL(leftClicked(int, int)), this, SLOT(paging_leftClicked(int, int))));
+        VERIFY(connect(_header->paging(), SIGNAL(rightClicked(int, int)), this, SLOT(paging_rightClicked(int, int))));
         VERIFY(connect(_header, SIGNAL(maximizedPart()), this, SIGNAL(maximizedPart())));
         VERIFY(connect(_header, SIGNAL(restoredSize()), this, SIGNAL(restoredSize())));
 
@@ -164,17 +183,54 @@ namespace Robomongo
         info._limit = limit;
         info._skip = skip;
         info._batchSize = batchSize;
-        _out->showProgress();
-        _shell->query(_out->resultIndex(this), info);
+        _outputWidget->showProgress();
+                
+        _shell->setScriptExecutable(true);
+        if (_aggrInfo.isValid) {
+            // Build original pipeline object, and append extra skip and limit for paging
+            std::string pipelineModified = "[";
+            for (int i = 0; ; i++) {
+                auto const obj = mongo::tojson(_aggrInfo.pipeline.getObjectField(std::to_string(i)));
+                if (obj.empty() || "{}" == obj)
+                    break;
+
+                pipelineModified.append(obj + ",");
+            }
+            pipelineModified.append("{$skip:" + std::to_string(skip) + "}, " +
+                                    "{$limit:" + std::to_string(batchSize) + "}" + 
+                                    "]");
+
+            std::string const query = "db.getCollection('" + _aggrInfo.collectionName + "').aggregate(" +
+                                      pipelineModified + ", " + _aggrInfo.options.toString() + ")";
+            
+            // Create aggr. info with new skip and batchsize
+            AggrInfo const aggrInfo { _aggrInfo.collectionName, skip, batchSize, _aggrInfo.pipeline, 
+                                      _aggrInfo.options, _outputWidget->resultIndex(this) };
+            _shell->setAggrInfo(aggrInfo);
+            _shell->execute(query);
+        }
+        else
+            _shell->query(_outputWidget->resultIndex(this), info);
     }
 
-    void OutputItemContentWidget::update(const MongoQueryInfo &inf,const std::vector<MongoDocumentPtr> &documents)
+    void OutputItemContentWidget::updateWithInfo(const MongoQueryInfo &inf, 
+                                                 const std::vector<MongoDocumentPtr> &documents)
     {
-        _queryInfo = inf;
+        update(documents, inf._skip, inf._batchSize);
+    }
+
+    void OutputItemContentWidget::updateWithInfo(const AggrInfo &aggrInfo, 
+                                                 const std::vector<MongoDocumentPtr> &documents)
+    {
+        update(documents, aggrInfo.skip, aggrInfo.batchSize);
+    }
+
+    void OutputItemContentWidget::update(const std::vector<MongoDocumentPtr> &documents, int skip, int batchSize)
+    {
         _documents = documents;
 
-        _header->paging()->setSkip(_queryInfo._skip);
-        _header->paging()->setBatchSize(_queryInfo._batchSize);
+        _header->paging()->setSkip(skip);
+        _header->paging()->setBatchSize(batchSize);
 
         _text.clear();
         _isFirstPartRendered = false;
@@ -241,7 +297,7 @@ namespace Robomongo
         }
 
         if (!_isTreeModeInitialized) {
-            _bsonTreeview = new BsonTreeView(_shell,_queryInfo);
+            _bsonTreeview = new BsonTreeView(_shell, _queryInfo, this);
             _bsonTreeview->setModel(_mod);
             _stack->addWidget(_bsonTreeview);
 
@@ -293,7 +349,7 @@ namespace Robomongo
         }
 
         if (!_isTableModeInitialized) {
-            _bsonTable = new BsonTableView(_shell,_queryInfo);            
+            _bsonTable = new BsonTableView(_shell, _queryInfo);
             BsonTableModelProxy *modp = new BsonTableModelProxy(_bsonTable);
             modp->setSourceModel(_mod);
             _bsonTable->setModel(modp);
@@ -310,6 +366,16 @@ namespace Robomongo
         _isTreeModeInitialized = false;
         _isCustomModeInitialized = false;
         _isTableModeInitialized = false;
+    }
+
+    void OutputItemContentWidget::applyDockUndockSettings(bool isDocking) const
+    {
+        _header->applyDockUndockSettings(isDocking);
+    }
+
+    void OutputItemContentWidget::toggleOrientation(Qt::Orientation orientation) const
+    {
+        _header->toggleOrientation(orientation);
     }
 
     void OutputItemContentWidget::jsonPartReady(const QString &json)
@@ -338,7 +404,7 @@ namespace Robomongo
     BsonTreeModel *OutputItemContentWidget::configureModel()
     {
         delete _mod;
-        _mod = new BsonTreeModel(_documents,this);
+        _mod = new BsonTreeModel(_documents, this);
         return _mod;
     }
 
@@ -352,7 +418,7 @@ namespace Robomongo
         FindFrame *_logText = new FindFrame(this);
         _logText->sciScintilla()->setLexer(javaScriptLexer);
         _logText->sciScintilla()->setTabWidth(4);        
-        _logText->sciScintilla()->setBraceMatching(QsciScintilla::StrictBraceMatch);
+        _logText->sciScintilla()->setAppropriateBraceMatching();
         _logText->sciScintilla()->setFont(textFont);
         _logText->sciScintilla()->setReadOnly(true);
         _logText->sciScintilla()->setWrapMode((QsciScintilla::WrapMode) QsciScintilla::SC_WRAP_NONE);

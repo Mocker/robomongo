@@ -155,13 +155,13 @@ namespace Robomongo
         }
 
         if (((keyEvent->modifiers() & Qt::ControlModifier) &&
-            (keyEvent->key()==Qt::Key_F4 || keyEvent->key()==Qt::Key_W ||
-             keyEvent->key()==Qt::Key_T || keyEvent->key()==Qt::Key_Space ||
-             keyEvent->key()==Qt::Key_F || keyEvent->key()==Qt::Key_Slash))
+            (keyEvent->key() == Qt::Key_F4 || keyEvent->key() == Qt::Key_W ||
+             keyEvent->key() == Qt::Key_T || keyEvent->key() == Qt::Key_Space ||
+             keyEvent->key() == Qt::Key_F || keyEvent->key() == Qt::Key_Slash))
             || keyEvent->key() == Qt::Key_Escape /*|| keyEvent->key() == Qt::Key_Return*/
-            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::AltModifier) && keyEvent->key()==Qt::Key_Left)
-            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::AltModifier) && keyEvent->key()==Qt::Key_Right)
-            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::ShiftModifier) && keyEvent->key()==Qt::Key_C)
+            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::AltModifier) && keyEvent->key() == Qt::Key_Left)
+            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::AltModifier) && keyEvent->key() == Qt::Key_Right)
+            || ((keyEvent->modifiers() & Qt::ControlModifier) && (keyEvent->modifiers() & Qt::ShiftModifier) && keyEvent->key() == Qt::Key_C)
            )
         {
             keyEvent->ignore();
@@ -182,4 +182,18 @@ namespace Robomongo
             setMarginWidth(0, _lineNumberMarginWidth);
         }
     }
+
+    void RoboScintilla::setAppropriateBraceMatching() {
+#ifdef Q_OS_MAC
+        // On Mac OS when brace matching is enabled, text
+        // will blink when you move cursor to some brace or
+        // when inside braces. This behaviour is not fully fixed
+        // in QScintilla 2.9.1 and 2.8.4
+        setBraceMatching(QsciScintilla::NoBraceMatch);
+#else
+        setBraceMatching(QsciScintilla::StrictBraceMatch);
+#endif
+    }
+
+
 }

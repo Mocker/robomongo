@@ -9,15 +9,19 @@
 #include "robomongo/core/domain/App.h"
 #include "robomongo/core/utils/QtUtils.h"
 
+#include "robomongo/gui/MainWindow.h"
 #include "robomongo/gui/widgets/explorer/ExplorerTreeWidget.h"
 #include "robomongo/gui/widgets/explorer/ExplorerServerTreeItem.h"
 #include "robomongo/gui/widgets/explorer/ExplorerCollectionTreeItem.h"
 #include "robomongo/gui/widgets/explorer/ExplorerDatabaseCategoryTreeItem.h"
+#include "robomongo/gui/widgets/explorer/ExplorerReplicaSetTreeItem.h"
+#include "robomongo/gui/widgets/explorer/ExplorerReplicaSetFolderItem.h"
+#include "robomongo/gui/widgets/explorer/ExplorerUserTreeItem.h"
 
 namespace Robomongo
 {
 
-    ExplorerWidget::ExplorerWidget(QWidget *parent) : BaseClass(parent),
+    ExplorerWidget::ExplorerWidget(MainWindow *parentMainWindow) : BaseClass(parentMainWindow),
         _progress(0)
     {
         _treeWidget = new ExplorerTreeWidget(this);
@@ -27,7 +31,12 @@ namespace Robomongo
         vlaout->addWidget(_treeWidget, Qt::AlignJustify);
 
         VERIFY(connect(_treeWidget, SIGNAL(itemExpanded(QTreeWidgetItem *)), this, SLOT(ui_itemExpanded(QTreeWidgetItem *))));
-        VERIFY(connect(_treeWidget, SIGNAL(itemDoubleClicked(QTreeWidgetItem *, int)), this, SLOT(ui_itemDoubleClicked(QTreeWidgetItem *, int))));
+        VERIFY(connect(_treeWidget, SIGNAL(itemDoubleClicked(QTreeWidgetItem *, int)), 
+                       this, SLOT(ui_itemDoubleClicked(QTreeWidgetItem *, int))));
+
+        // Temporarily disabling export/import feature
+        //VERIFY(connect(_treeWidget, SIGNAL(currentItemChanged(QTreeWidgetItem *, QTreeWidgetItem *)),
+        //               parentMainWindow, SLOT(onExplorerItemSelected(QTreeWidgetItem *))));
 
         setLayout(vlaout);
 
@@ -36,6 +45,11 @@ namespace Robomongo
         _progressLabel->setMovie(movie);
         _progressLabel->hide();
         movie->start();        
+    }
+
+    QTreeWidgetItem* ExplorerWidget::getSelectedTreeItem() const
+    {
+        return _treeWidget->currentItem();
     }
 
     void ExplorerWidget::keyPressEvent(QKeyEvent *event)
@@ -89,9 +103,13 @@ namespace Robomongo
 
     void ExplorerWidget::handle(ConnectionEstablishedEvent *event)
     {
+        // Do not make UI changes for non PRIMARY connections
+        if (event->connectionType != ConnectionPrimary)
+            return;
+
         decreaseProgress();
 
-        ExplorerServerTreeItem *item = new ExplorerServerTreeItem(_treeWidget,event->server);
+        auto item = new ExplorerServerTreeItem(_treeWidget, event->server, event->connInfo);
         _treeWidget->addTopLevelItem(item);
         _treeWidget->setCurrentItem(item);
         _treeWidget->setFocus();
@@ -104,29 +122,50 @@ namespace Robomongo
 
     void ExplorerWidget::ui_itemExpanded(QTreeWidgetItem *item)
     {
-        ExplorerDatabaseCategoryTreeItem *categoryItem = dynamic_cast<ExplorerDatabaseCategoryTreeItem *>(item);
+        auto categoryItem = dynamic_cast<ExplorerDatabaseCategoryTreeItem *>(item);
         if (categoryItem) {
             categoryItem->expand();
             return;
         }
 
-        ExplorerServerTreeItem *serverItem = dynamic_cast<ExplorerServerTreeItem *>(item);
+        auto serverItem = dynamic_cast<ExplorerServerTreeItem *>(item);
         if (serverItem) {
             serverItem->expand();
             return;
         }
+
+        auto replicaSetFolder = dynamic_cast<ExplorerReplicaSetFolderItem *>(item);
+        if (replicaSetFolder) {
+            replicaSetFolder->expand();
+            return;
+        }
        
-        ExplorerCollectionDirIndexesTreeItem * dirItem = dynamic_cast<ExplorerCollectionDirIndexesTreeItem *>(item);
+        auto dirItem = dynamic_cast<ExplorerCollectionDirIndexesTreeItem *>(item);
         if (dirItem) {
             dirItem->expand();
         }
     }
 
     void ExplorerWidget::ui_itemDoubleClicked(QTreeWidgetItem *item, int column)
-    {
-        ExplorerCollectionTreeItem *collectionItem = dynamic_cast<ExplorerCollectionTreeItem *>(item);
-        if (collectionItem) {
+    {        
+        if (auto collectionItem = dynamic_cast<ExplorerCollectionTreeItem *>(item)) {
             AppRegistry::instance().app()->openShell(collectionItem->collection());
+            return;
         }
+
+        if (auto userItem = dynamic_cast<ExplorerUserTreeItem *>(item)) {
+            userItem->ui_viewUser();
+            return;
+        }
+
+        auto replicaMemberItem = dynamic_cast<ExplorerReplicaSetTreeItem*>(item);
+        if (replicaMemberItem && replicaMemberItem->isUp()) {
+            AppRegistry::instance().app()->openShell(replicaMemberItem->server(), 
+                replicaMemberItem->connectionSettings(), ScriptInfo("", true));
+            return;
+        }
+
+        // Toggle expanded state
+        item->setExpanded(!item->isExpanded());
     }
 }

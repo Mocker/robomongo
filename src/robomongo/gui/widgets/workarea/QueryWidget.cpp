@@ -1,12 +1,17 @@
 #include "robomongo/gui/widgets/workarea/QueryWidget.h"
 
+#include <QObject>
+#include <QPushButton>
 #include <QApplication>
 #include <QLabel>
 #include <QFileInfo>
 #include <QVBoxLayout>
+#include <QMessageBox>
+#include <QMainWindow>
+#include <QDockWidget>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qscilexerjavascript.h>
-#include <mongo/client/dbclient.h>
+#include <mongo/client/dbclientinterface.h>
 
 #include "robomongo/core/AppRegistry.h"
 #include "robomongo/core/EventBus.h"
@@ -15,16 +20,21 @@
 #include "robomongo/core/domain/MongoDatabase.h"
 #include "robomongo/core/domain/MongoServer.h"
 #include "robomongo/core/domain/MongoShell.h"
+#include "robomongo/core/domain/MongoAggregateInfo.h"
 #include "robomongo/core/events/MongoEvents.h"
 #include "robomongo/core/settings/ConnectionSettings.h"
 #include "robomongo/core/settings/SettingsManager.h"
 #include "robomongo/core/utils/QtUtils.h"
+#include "robomongo/core/utils/Logger.h"
 
 #include "robomongo/gui/GuiRegistry.h"
 #include "robomongo/gui/widgets/workarea/OutputWidget.h"
 #include "robomongo/gui/widgets/workarea/ScriptWidget.h"
+#include "robomongo/gui/widgets/workarea/OutputItemContentWidget.h"
+#include "robomongo/gui/widgets/workarea/OutputItemHeaderWidget.h"
 #include "robomongo/gui/editors/PlainJavaScriptEditor.h"
 #include "robomongo/gui/editors/JSLexer.h"
+#include "robomongo/gui/dialogs/ChangeShellTimeoutDialog.h"
 
 using namespace mongo;
 
@@ -33,33 +43,48 @@ namespace Robomongo
     QueryWidget::QueryWidget(MongoShell *shell, QWidget *parent) :
         QWidget(parent),
         _shell(shell),
-        _viewer(NULL),
+        _viewer(nullptr),
+        _dock(nullptr),
         _isTextChanged(false)
     {
         AppRegistry::instance().bus()->subscribe(this, DocumentListLoadedEvent::Type, shell);
         AppRegistry::instance().bus()->subscribe(this, ScriptExecutedEvent::Type, shell);
         AppRegistry::instance().bus()->subscribe(this, AutocompleteResponse::Type, shell);
 
-        _scriptWidget = new ScriptWidget(_shell);
-        VERIFY(connect(_scriptWidget,SIGNAL(textChanged()),this,SLOT(textChange())));
+        // Make QMessageBox text selectable
+        // setStyleSheet("QMessageBox { messagebox-text-interaction-flags: 5; }");
 
-        _viewer = new OutputWidget();
+        _scriptWidget = new ScriptWidget(_shell, this);
+        VERIFY(connect(_scriptWidget, SIGNAL(textChanged()), this, SLOT(textChange())));
+
+        // Need to use QMainWindow in order to make use of all features of docking.
+        // (Note: Qt full support for dock windows implemented only for QMainWindow)
+        _viewer = new OutputWidget(this);
+        _outputWindow = new QMainWindow;
+        _dock = new CustomDockWidget(this);
+        _dock->setAllowedAreas(Qt::NoDockWidgetArea);
+        _dock->setFeatures(QDockWidget::DockWidgetFloatable);
+        _dock->setWidget(_viewer);
+        _dock->setTitleBarWidget(new QWidget);
+        VERIFY(connect(_dock, SIGNAL(topLevelChanged(bool)), this, SLOT(on_dock_undock())));
+        _outputWindow->addDockWidget(Qt::BottomDockWidgetArea, _dock);
+
         _outputLabel = new QLabel(this);
         _outputLabel->setContentsMargins(0, 5, 0, 0);
         _outputLabel->setVisible(false);
 
-        QFrame *line = new QFrame(this);
-        line->setFrameShape(QFrame::HLine);
-        line->setFrameShadow(QFrame::Raised);
+        _line = new QFrame(this);
+        _line->setFrameShape(QFrame::HLine);
+        _line->setFrameShadow(QFrame::Raised);
 
-        QVBoxLayout *layout = new QVBoxLayout;
-        layout->setSpacing(0);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(_scriptWidget, 0, Qt::AlignTop);
-        layout->addWidget(line);
-        layout->addWidget(_outputLabel, 0, Qt::AlignTop);
-        layout->addWidget(_viewer, 1);
-        setLayout(layout);
+        _mainLayout = new QVBoxLayout;
+        _mainLayout->setSpacing(0);
+        _mainLayout->setContentsMargins(0, 0, 0, 0);
+        _mainLayout->addWidget(_scriptWidget); 
+        _mainLayout->addWidget(_line);
+        _mainLayout->addWidget(_outputLabel, 0, Qt::AlignTop);
+        _mainLayout->addWidget(_outputWindow, 1);      
+        setLayout(_mainLayout);
     }
 
     void QueryWidget::setScriptFocus()
@@ -75,6 +100,27 @@ namespace Robomongo
     void QueryWidget::hideAutocompletion()
     {
         _scriptWidget->hideAutocompletion();
+    }
+
+    void QueryWidget::setCurrentDatabase(const std::string & dbname)
+    {
+        _scriptWidget->setCurrentDatabase(dbname);
+    }
+
+    void QueryWidget::bringDockToFront()
+    {
+        _dock->raise(); // required for MAC only; possible Qt bug
+        _dock->activateWindow();
+    }
+
+    bool QueryWidget::outputWindowDocked() const
+    {
+        if (_dock) {
+            return !_dock->isFloating();
+        }
+        else {  // _dock is not initialized yet, but it will be docked when initialized
+            return true;
+        }
     }
 
     void QueryWidget::execute()
@@ -100,10 +146,11 @@ namespace Robomongo
 
     void QueryWidget::openNewTab()
     {
-        if(_shell){
+        if (_shell) {
             MongoServer *server = _shell->server();
             QString query = _scriptWidget->selectedText();
-            AppRegistry::instance().app()->openShell(server, query, _currentResult.currentDatabase(), AppRegistry::instance().settingsManager()->autoExec());
+            AppRegistry::instance().app()->openShell(server, query, _currentResult.currentDatabase(), 
+                AppRegistry::instance().settingsManager()->autoExec());
         }
     }
 
@@ -112,7 +159,7 @@ namespace Robomongo
         if (_shell) {
             _shell->setScript(_scriptWidget->text());
             if (_shell->saveToFile()) {
-                _isTextChanged =false;
+                _isTextChanged = false;
                 updateCurrentTab();
             }
         }
@@ -123,7 +170,7 @@ namespace Robomongo
         if (_shell) {
             _shell->setScript(_scriptWidget->text());
             if (_shell->saveToFileAs()) {
-                _isTextChanged =false;
+                _isTextChanged = false;
                 updateCurrentTab();
             }
         }        
@@ -185,27 +232,88 @@ namespace Robomongo
         _viewer->showProgress();
     }
 
+    void QueryWidget::dockUndock() 
+    {
+        // Toggle between dock/undock
+        _dock->setFloating(!_dock->isFloating());
+    };
+    
+    void QueryWidget::changeShellTimeout() 
+    {
+        changeShellTimeoutDialog();
+    }
+
     void QueryWidget::hideProgress()
     {
         _viewer->hideProgress();
     }
 
-
     void QueryWidget::handle(DocumentListLoadedEvent *event)
     {
-        hideProgress();        
+        hideProgress();
+
+        if (event->isError()) {
+            QString message = QString("Failed to load documents.\n\nError:\n%1")
+                .arg(QtUtils::toQString(event->error().errorMessage()));
+            QMessageBox::information(this, "Error", message);
+            return;
+        }
+
         _viewer->updatePart(event->resultIndex(), event->queryInfo(), event->documents()); // this should be in viewer, subscribed to ScriptExecutedEvent
     }
 
     void QueryWidget::handle(ScriptExecutedEvent *event)
     {
-        hideProgress();
-        _currentResult = event->result();        
+        hideProgress();        
+        _currentResult = event->result();
+
+        if (_currentResult.results().size() == 1) {
+            MongoShellResult const& result = _currentResult.results().front();
+            AggrInfo const& aggrInfo = result.aggrInfo();
+            if (aggrInfo.isValid && aggrInfo.resultIndex > -1) {
+                _viewer->updatePart(aggrInfo.resultIndex, aggrInfo, _currentResult.results().front().documents());
+                return;
+            }
+        }
 
         updateCurrentTab();
+
         displayData(event->result().results(), event->empty());
-        _scriptWidget->setup(event->result()); // this should be in ScriptWidget, which is subscribed to ScriptExecutedEvent              
+        // this should be in ScriptWidget, which is subscribed to ScriptExecutedEvent              
+        _scriptWidget->setup(event->result()); 
         activateTabContent();
+
+        if (event->isError()) {
+            // For some cases, event error message already contains string "Error:"
+            QString const& subStr =
+                QString::fromStdString(event->error().errorMessage()).startsWith("Error", Qt::CaseInsensitive) ?
+                "" : "Error:\n";
+
+            QString const& message = "Failed to execute script.\n\n" + subStr +
+                QString::fromStdString((event->error().errorMessage()));
+
+            QMessageBox::critical(this, "Error", message);
+        }
+
+        if (event->timeoutReached()) {
+            auto const shellTimeoutSec = AppRegistry::instance().settingsManager()->shellTimeoutSec();
+            QString const subStr = _currentResult.results().size() > 1 ?
+                "At least one of the scripts has reached shell timeout" :
+                "The script has reached shell timeout";
+            QString const secondStr = (shellTimeoutSec > 1) ? " seconds)" : " second)";
+            QString messageShort = "Failed to execute all of the script. " + subStr + " (" +
+                                    QString::number(shellTimeoutSec) + secondStr + " limit. ";
+            QString messageLong = messageShort + 
+                                  "\n\nPlease increase the value of shell timeout using button below "
+                                  "or from the main window menu \"Options->Change Shell Timeout\".";
+            LOG_MSG(messageShort, mongo::logger::LogSeverity::Error());
+
+            auto errorDia = new QMessageBox(QMessageBox::Icon::Critical, "Error", messageLong);
+            auto but = new QPushButton("Change Shell Timeout");
+            VERIFY(connect(but, SIGNAL(clicked()), this, SLOT(changeShellTimeout())));
+            errorDia->addButton(but, QMessageBox::NoRole);
+            errorDia->exec();
+        }
     }
 
     void QueryWidget::activateTabContent()
@@ -216,7 +324,36 @@ namespace Robomongo
 
     void QueryWidget::handle(AutocompleteResponse *event)
     {
+        if (event->isError()) {
+            // Do not show error message (error should be already logged)
+            return;
+        }
+
         _scriptWidget->showAutocompletion(event->list, QtUtils::toQString(event->prefix) );
+    }
+
+    void QueryWidget::on_dock_undock()
+    {
+        if (!_dock->isFloating()) {    // If output window docked 
+            // Settings to revert to docked mode
+            _scriptWidget->ui_queryLinesCountChanged();
+            _mainLayout->addWidget(_scriptWidget);                     
+            _mainLayout->addWidget(_line);
+            _mainLayout->addWidget(_outputWindow, 1);
+            _dock->setFeatures(QDockWidget::DockWidgetFloatable);
+            _dock->setTitleBarWidget(new QWidget);
+            _viewer->applyDockUndockSettings(true);
+        }
+        else {              // output window undocked(floating)
+            // Settings for query window in order to use maximum space
+            _scriptWidget->disableFixedHeight();
+            _mainLayout->addWidget(_scriptWidget, 1); 
+            _mainLayout->addWidget(_line);
+            _mainLayout->addWidget(_outputWindow);
+            _dock->setFeatures(QDockWidget::DockWidgetClosable);
+            _dock->setTitleBarWidget(nullptr);
+            _viewer->applyDockUndockSettings(false);
+        }
     }
 
     void QueryWidget::updateCurrentTab()
@@ -224,7 +361,7 @@ namespace Robomongo
         const QString &shellQuery = QtUtils::toQString(_shell->query());
         QString toolTipQuery = shellQuery.left(700);
 
-        QString tabTitle,toolTipText;
+        QString tabTitle, toolTipText;
         if (_shell) {
             QFileInfo fileInfo(_shell->filePath());
             if (fileInfo.isFile()) {
@@ -233,13 +370,13 @@ namespace Robomongo
             }
         }
 
-        if (tabTitle.isEmpty()&&shellQuery.isEmpty()) {
+        if (tabTitle.isEmpty() && shellQuery.isEmpty()) {
             tabTitle = "New Shell";
         }
         else {
 
             if (tabTitle.isEmpty()) {
-                tabTitle = shellQuery.left(41).replace(QRegExp("[\n\r\t]"), " ");;
+                tabTitle = shellQuery.left(41).replace(QRegExp("[\n\r\t]"), " ");
                 toolTipText = QString("<pre>%1</pre>").arg(toolTipQuery);
             }
             else {
@@ -266,6 +403,6 @@ namespace Robomongo
             _outputLabel->setVisible(isOutVisible);
         }
 
-        _viewer->present(_shell,results);
+        _viewer->present(_shell, results);
     }
 }

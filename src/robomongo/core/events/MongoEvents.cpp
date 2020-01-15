@@ -5,6 +5,11 @@ namespace Robomongo
 {
     R_REGISTER_EVENT(EstablishConnectionRequest)
     R_REGISTER_EVENT(EstablishConnectionResponse)
+    R_REGISTER_EVENT(ReplicaSetRefreshed)
+    R_REGISTER_EVENT(RefreshReplicaSetFolderRequest)
+    R_REGISTER_EVENT(RefreshReplicaSetFolderResponse)
+    R_REGISTER_EVENT(ReplicaSetFolderLoading)
+    R_REGISTER_EVENT(ReplicaSetFolderRefreshed)
     R_REGISTER_EVENT(LoadDatabaseNamesRequest)
     R_REGISTER_EVENT(LoadDatabaseNamesResponse)
     R_REGISTER_EVENT(LoadCollectionNamesRequest)
@@ -60,4 +65,11 @@ namespace Robomongo
     R_REGISTER_EVENT(DropFunctionRequest)
     R_REGISTER_EVENT(DropFunctionResponse)
     R_REGISTER_EVENT(QueryWidgetUpdatedEvent)
+    R_REGISTER_EVENT(EstablishSshConnectionRequest)
+    R_REGISTER_EVENT(EstablishSshConnectionResponse)
+    R_REGISTER_EVENT(ListenSshConnectionRequest)
+    R_REGISTER_EVENT(ListenSshConnectionResponse)
+    R_REGISTER_EVENT(LogEvent)
+    R_REGISTER_EVENT(StopScriptRequest)
+    R_REGISTER_EVENT(OperationFailedEvent)
 }

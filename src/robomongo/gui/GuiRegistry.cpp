@@ -25,7 +25,9 @@ namespace Robomongo
         view->setAlternatingRowColors(true);
 
         QPalette p = view->palette();
-        p.setColor(QPalette::AlternateBase, QColor(243, 246, 250));
+//        p.setColor(QPalette::AlternateBase, QColor(243, 246, 250));
+        p.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
+        p.setColor(QPalette::Active, QPalette::Highlight, QColor(16, 108, 214));
         view->setPalette(p);
     #endif
     }
@@ -34,6 +36,36 @@ namespace Robomongo
     {
         static const QIcon serverIc = QIcon(":/robomongo/icons/server_16x16.png");
         return serverIc;
+    }
+
+    const QIcon &GuiRegistry::serverImportedIcon() const
+    {
+        static const QIcon importedIcon = QIcon(":/robomongo/icons/server_imported_16x16.png");
+        return importedIcon;
+    }
+
+    const QIcon &GuiRegistry::serverPrimaryIcon() const
+    {
+        static const QIcon icon(":/robomongo/icons/server_primary_16x16.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::serverSecondaryIcon() const
+    {
+        static const QIcon icon(":/robomongo/icons/server_secondary_16x16.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::replicaSetIcon() const
+    {
+        static const QIcon replicaSetIc(":/robomongo/icons/replica_set_16x16.png");
+        return replicaSetIc;
+    }
+
+    const QIcon &GuiRegistry::replicaSetOfflineIcon() const
+    {
+        static const QIcon icon(":/robomongo/icons/replica_set_offline_16x16.png");
+        return icon;
     }
 
     const QIcon &GuiRegistry::openIcon() const
@@ -82,14 +114,26 @@ namespace Robomongo
 
     const QIcon &GuiRegistry::maximizeIcon() const
     {
-        static const QIcon maximizeIc = QIcon(":/robomongo/icons/maximize.gif");
+        static const QIcon maximizeIc(":/robomongo/icons/maximize.png");
         return maximizeIc;
     }
 
-    const QIcon &GuiRegistry::maximizeHighlightedIcon() const
+    const QIcon &GuiRegistry::minimizeIcon() const
     {
-        static const QIcon maximizeHighlightedIc = QIcon(":/robomongo/icons/maximize_highlighted_16x16.png");
-        return maximizeHighlightedIc;
+        static const QIcon minimizeIc(":/robomongo/icons/minimize.png");
+        return minimizeIc;
+    }
+
+    const QIcon &GuiRegistry::undockIcon() const
+    {
+        static const QIcon undockIc(":/robomongo/icons/undock.png");
+        return undockIc;
+    }
+
+    const QIcon &GuiRegistry::dockIcon() const
+    {
+        static const QIcon dockIc(":/robomongo/icons/dock.png");
+        return dockIc;
     }
 
     const QIcon &GuiRegistry::textIcon() const
@@ -195,6 +239,12 @@ namespace Robomongo
         return bsonDoubleIc;
     }
 
+	const QIcon &GuiRegistry::bsonNumberDecimalIcon() const
+	{
+		static const QIcon icon(":/robomongo/icons/bson_decimal128_16x16.png");
+		return icon;
+	}
+
     const QIcon &GuiRegistry::bsonDateTimeIcon() const
     {
         static const QIcon bsonDateTimeIc = QIcon(":/robomongo/icons/bson_datetime_16x16.png");
@@ -221,14 +271,26 @@ namespace Robomongo
 
     const QIcon &GuiRegistry::noMarkIcon() const
     {
-        static const QIcon noMarkIc = QIcon(":/robomongo/icons/no_mark_16x16.png");
+        static const QIcon noMarkIc = QIcon(":/robomongo/icons/no_mark_24x24.png");
         return noMarkIc;
     }
 
     const QIcon &GuiRegistry::yesMarkIcon() const
     {
-        static const QIcon yesMarkIc = QIcon(":/robomongo/icons/yes_mark_16x16.png");
+        static const QIcon yesMarkIc = QIcon(":/robomongo/icons/yes_mark_24x24.png");
         return yesMarkIc;
+    }
+
+    const QIcon &GuiRegistry::skipMarkIcon() const
+    {
+        static const QIcon skipMarkIc = QIcon(":/robomongo/icons/skip_mark_24x24.png");
+        return skipMarkIc;
+    }
+
+    const QIcon &GuiRegistry::questionMarkIcon() const
+    {
+        static const QIcon questionMarkIc = QIcon(":/robomongo/icons/question_mark_24x24.png");
+        return questionMarkIc;
     }
 
     const QIcon &GuiRegistry::timeIcon() const
@@ -243,9 +305,33 @@ namespace Robomongo
         return keyIc;
     }
 
+    const QIcon &GuiRegistry::showIcon() const
+    {
+        static const QIcon icon = QIcon(":/robomongo/icons/show_64x64.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::hideIcon() const
+    {
+        static const QIcon icon = QIcon(":/robomongo/icons/hide_64x64.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::plusIcon() const
+    {
+        static const QIcon icon {":/robomongo/icons/plus_sign.png"};
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::minusIcon() const
+    {
+        static const QIcon icon {":/robomongo/icons/minus_sign.png"};
+        return icon;
+    }
+
     const QBrush &GuiRegistry::typeBrush() const
     {
-        static const QBrush typeBrush = QBrush(QColor(150,150, 150));
+        static const QBrush typeBrush = QBrush(QColor(150, 150, 150));
         return typeBrush;
     }
 
@@ -267,6 +353,12 @@ namespace Robomongo
         static const QIcon mongodbIc = QIcon(":/robomongo/icons/mongodb_16x16.png");
         return mongodbIc;
     }
+    
+    const QIcon &GuiRegistry::mongodbIconForMAC() const
+    {
+        static const QIcon mongodbIc = QIcon(":/robomongo/icons/mongodb_icon_for_MAC.png");
+        return mongodbIc;
+    }
 
     const QIcon &GuiRegistry::connectIcon() const
     {
@@ -286,10 +378,46 @@ namespace Robomongo
         return stopIc;
     }
 
+    const QIcon &GuiRegistry::exportIcon() const
+    {
+        static const QIcon exportIc = QIcon(":/robomongo/icons/export_64x64.png");
+        return exportIc;
+    }
+
+    const QIcon &GuiRegistry::importIcon() const
+    {
+        static const QIcon importIc = QIcon(":/robomongo/icons/import_64x64.png");
+        return importIc;
+    }
+
+    const QIcon &GuiRegistry::deleteIcon() const
+    {
+        static const QIcon icon(":/robomongo/icons/delete.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::deleteIconRed() const
+    {
+        static const QIcon icon(":/robomongo/icons/delete_red_color.png");
+        return icon;
+    }
+
+    const QIcon &GuiRegistry::deleteIconMouseHovered() const
+    {
+        static const QIcon icon(":/robomongo/icons/delete_mouse_hovered.png");
+        return icon;
+    }
+
     const QIcon &GuiRegistry::mainWindowIcon() const
     {
-        static const QIcon mainWindowIc = QIcon(":/robomongo/icons/main_window_icon.png");
+        static const QIcon mainWindowIc = QIcon(":/robomongo/icons/logo-256x256.png");
         return mainWindowIc;
+    }
+
+    const QIcon& GuiRegistry::welcomeTabIcon() const
+    {
+        static const QIcon icon(":/robomongo/icons/welcome_tab_icon.png");
+        return icon;
     }
 
     const QFont &GuiRegistry::font() const

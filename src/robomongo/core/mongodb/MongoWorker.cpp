@@ -1,6 +1,14 @@
 #include "robomongo/core/mongodb/MongoWorker.h"
 
+#include <algorithm>
+#include <exception>
+
 #include <QThread>
+
+#include "mongo/client/global_conn_pool.h"
+#include "mongo/client/replica_set_monitor.h"
+#include <mongo/util/net/ssl_manager.h>
+#include <mongo/util/net/ssl_options.h>
 
 #include "robomongo/core/events/MongoEvents.h"
 #include "robomongo/core/engine/ScriptEngine.h"
@@ -8,52 +16,85 @@
 #include "robomongo/core/AppRegistry.h"
 #include "robomongo/core/mongodb/MongoClient.h"
 #include "robomongo/core/settings/ConnectionSettings.h"
+#include "robomongo/core/settings/ReplicaSetSettings.h"
 #include "robomongo/core/domain/MongoShellResult.h"
 #include "robomongo/core/domain/MongoCollectionInfo.h"
 #include "robomongo/core/settings/CredentialSettings.h"
 #include "robomongo/core/settings/SettingsManager.h"
+#include "robomongo/core/settings/SslSettings.h"
+#include "robomongo/core/utils/BsonUtils.h"
 #include "robomongo/core/utils/Logger.h"
 #include "robomongo/core/utils/QtUtils.h"
+#include "robomongo/utils/StringOperations.h"
 
 namespace Robomongo
 {
-    MongoWorker::MongoWorker(ConnectionSettings *connection,bool isLoadMongoRcJs, int batchSize, QObject *parent) : QObject(parent),
-        _connection(connection),
-        _scriptEngine(NULL),
-        _dbclient(NULL),
+    std::string const PRIMARY_UNREACHABLE = "Replica set's primary is unreachable.";
+
+    MongoWorker::MongoWorker(ConnectionSettings *connection, bool isLoadMongoRcJs, int batchSize,
+                             int mongoTimeoutSec, int shellTimeoutSec, QObject *parent) : QObject(parent),
+        _scriptEngine(nullptr),
         _isAdmin(true),
         _isLoadMongoRcJs(isLoadMongoRcJs),
         _batchSize(batchSize),
-        _timerId(-1)
-    {         
-        _thread = new QThread(this);
+        _timerId(-1),
+        _dbAutocompleteCacheTimerId(-1),
+        _mongoTimeoutSec(mongoTimeoutSec),
+        _shellTimeoutSec(shellTimeoutSec),
+        _isQuiting(0),
+        _dbclient(nullptr),
+        _dbclientRepSet(nullptr),
+        _connSettings(connection)
+    {
+        // Whitespace removed from the start and the end of host string
+        _connSettings->setServerHost(QString::fromStdString(_connSettings->serverHost()).trimmed().toStdString());
+        _thread = new QThread();
         moveToThread(_thread);
-        VERIFY(connect( _thread, SIGNAL(started()), this, SLOT(init()) ));
+        VERIFY(connect( _thread, SIGNAL(finished()), _thread, SLOT(deleteLater()) ));
+        VERIFY(connect( _thread, SIGNAL(finished()), this, SLOT(deleteLater()) ));
         _thread->start();
     }
 
     void MongoWorker::timerEvent(QTimerEvent *event)
     {
-        if (_timerId==event->timerId())
-        {
+        if (_timerId == event->timerId()) {
             keepAlive();
+            return;
         }
+
+        if (_dbAutocompleteCacheTimerId == event->timerId() && !_scriptEngine) {
+            _scriptEngine->invalidateDbCollectionsCache();
+            return;
+        }
+    }
+
+    void MongoWorker::restartReplicaSetConnection()
+    {
+        if (!_connSettings->hasEnabledPrimaryCredential())
+            return;
+
+        CredentialSettings *credentials = _connSettings->primaryCredential();
+        mongo::BSONObj authParams(mongo::BSONObjBuilder()
+            .append("user", credentials->userName())
+            .append("db", credentials->databaseName())
+            .append("pwd", credentials->userPassword())
+            .append("mechanism", credentials->mechanism())
+            .obj());
+
+        _dbclientRepSet.release();
+        if(mongo::DBClientBase *conn = getConnection(true).first)
+            conn->auth(authParams);
     }
 
     void MongoWorker::keepAlive()
     {
         try {
             if (_dbclient) {
-                // Building { ping: 1 }
-                mongo::BSONObjBuilder command;
-                command.append("ping", 1);
-                mongo::BSONObj result;
-                std::string authBase = getAuthBase();
-                if (authBase.empty()) {
-                    _dbclient->runCommand("admin", command.obj(), result);
-                } else {
-                    _dbclient->runCommand(authBase, command.obj(), result);
-                }
+                pingDatabase(_dbclient.get());
+            }
+
+            if (_dbclientRepSet) {
+                pingDatabase(_dbclientRepSet.get());
             }
 
             if (_scriptEngine) {
@@ -61,80 +102,213 @@ namespace Robomongo
             }
 
         } catch(std::exception &ex) {
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            LOG_MSG("Failed to ping the server. MongoWorker::keepAlive() failed. " + std::string(ex.what()), 
+                    mongo::logger::LogSeverity::Error());
         }
     }
 
     void MongoWorker::init()
     {        
         try {
-            _scriptEngine = new ScriptEngine(_connection);
+            _scriptEngine.reset(new ScriptEngine(_connSettings, _shellTimeoutSec));
             _scriptEngine->init(_isLoadMongoRcJs);
-            _scriptEngine->use(_connection->defaultDatabase());
+            _scriptEngine->use(_connSettings->defaultDatabase());
             _scriptEngine->setBatchSize(_batchSize);
             _timerId = startTimer(pingTimeMs);
+            _dbAutocompleteCacheTimerId = startTimer(30000);
+        } catch (const std::exception &ex) {
+            LOG_MSG("Failed to initialize MongoWorker. " + std::string(ex.what()), 
+                     mongo::logger::LogSeverity::Error());
         }
-        catch (const std::exception &ex) {
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+    }
+
+    void MongoWorker::interrupt() {
+        try {
+            if (_isQuiting || !_scriptEngine)
+                return;
+
+            _scriptEngine->interrupt();
+        } catch(const std::exception &ex) {
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
     MongoWorker::~MongoWorker()
     {
-        delete _dbclient;
-        delete _connection;
-        _thread->quit();
-        if (!_thread->wait(2000))
-            _thread->terminate();
+        if (_timerId != -1)
+            killTimer(_timerId);
 
-        delete _scriptEngine;
-        delete _thread;
+        if (_dbAutocompleteCacheTimerId != -1)
+            killTimer(_dbAutocompleteCacheTimerId);
+
+        delete _connSettings;
+
+        // QThread "_thread" and MongoWorker itself will be deleted later
+        // (see MongoWorker() constructor)
+    }
+
+    void MongoWorker::stopAndDelete()
+    {
+        _isQuiting = 1;
+        _thread->quit();
+    }
+
+    void MongoWorker::changeTimeout(int newTimeout)
+    {
+        _scriptEngine->changeTimeout(newTimeout);
     }
 
     /**
      * @brief Initiate connection to MongoDB
      */
-    void MongoWorker::handle(EstablishConnectionRequest *event)
+    bool MongoWorker::handle(EstablishConnectionRequest *event)
     {
         QMutexLocker lock(&_firstConnectionMutex);
 
-        try {
-            mongo::DBClientBase *conn = getConnection();
-            bool hasPrimary = _connection->hasEnabledPrimaryCredential();
-            if (hasPrimary) {
-                std::string errmsg;
-                bool ok = conn->auth(
-                    _connection->primaryCredential()->databaseName(),
-                    _connection->primaryCredential()->userName(),
-                    _connection->primaryCredential()->userPassword(), errmsg);
+        std::unique_ptr<ReplicaSet> repSetInfo(new ReplicaSet);
+        auto errorCode = EventError::ErrorCode::Unknown;
 
-                if (!ok) {
-                    throw std::runtime_error("Unable to authorize");
+        try {
+            auto const& connAndErrorStr = getConnection(true);
+            mongo::DBClientBase *conn = connAndErrorStr.first;           
+            
+            // --- Connection failed for single server & replica set (no member of the set is reachable)
+            if (!conn) 
+            {
+                auto errorReason = std::string("Connection failure: Unknown error.");
+                auto const& connErrorStr = connAndErrorStr.second;
+
+                if (_connSettings->sslSettings()->sslEnabled())
+                     errorReason = 
+                         "SSL tunnel failure: Network is unreachable or SSL connection rejected by server." + 
+                          (connErrorStr.empty() ? "" : " Reason: " + connErrorStr);
+                else {  // Non-SSL connections
+                    if (_connSettings->isReplicaSet()) {
+                        errorReason = "No member of the set is reachable." + 
+                                      (connErrorStr.empty() ? "" : " Reason: " + connErrorStr);
+                        std::vector<std::pair<std::string, bool>> membersAndHealths;
+                        for (auto const& member : _connSettings->replicaSetSettings()->members())
+                            membersAndHealths.push_back({ member, false });
+                        
+                        repSetInfo.reset(new ReplicaSet("", mongo::HostAndPort(), membersAndHealths, errorReason));
+                    }
+                    else    // single server
+                        errorReason = "Network is unreachable." + (connErrorStr.empty() ? "" : " Reason: " + connErrorStr);
                 }
+                resetGlobalSSLparams();
+
+                reply(event->sender(), new EstablishConnectionResponse(this, EventError(errorReason, errorCode),             
+                      event->connectionType, event->uuid, *repSetInfo.release(), 
+                      EstablishConnectionResponse::MongoConnection));
+
+                return false;
+            }
+            
+            // --- Single server: Connection successful 
+            // --- Replica set:   Connection successful (primary reachable) or 
+            //                    Connection failed (primary unreachable with at least one reachable member)
+            if (_connSettings->isReplicaSet()) {
+                bool refresh = (ConnectionType::ConnectionRefresh == event->connectionType);
+                ReplicaSet const& setInfo = getReplicaSetInfo(refresh);
+
+                // Check if same set name used with different members which is not supported
+                auto const& members = _connSettings->replicaSetSettings()->members();
+                if (std::find(members.cbegin(), members.cend(), setInfo.primary.toString()) == members.cend()) 
+                {   // primary not found between user entered members
+                    std::string const errorStr = "Different members found under same replica set name \"" + 
+                         setInfo.setName + "\".";
+                    repSetInfo.reset(new ReplicaSet(setInfo));
+                    errorCode = EventError::ErrorCode::ServerHasDifferentMembers;
+                    LOG_MSG(errorStr, mongo::logger::LogSeverity::Error());
+                    throw std::runtime_error(errorStr);
+                }
+
+                if (setInfo.primary.empty()) {  // No reachable primary
+                    repSetInfo.reset(new ReplicaSet(setInfo)); // Pass possible reachable secondary(ies) info 
+                    LOG_MSG(setInfo.errorStr, mongo::logger::LogSeverity::Error());
+                    throw std::runtime_error(setInfo.errorStr);
+                }
+                else {  // Primary is reachable, save setInfo and continue
+                    repSetInfo.reset(new ReplicaSet(setInfo));
+                }
+            }
+
+            if (_connSettings->hasEnabledPrimaryCredential()) {
+                CredentialSettings *credentials = _connSettings->primaryCredential();
+
+                // Building BSON object:
+                mongo::BSONObj authParams(mongo::BSONObjBuilder()
+                    .append("user", credentials->userName())
+                    .append("db", credentials->databaseName())
+                    .append("pwd", credentials->userPassword())
+                    .append("mechanism", credentials->mechanism())
+                    .obj());
+
+                conn->auth(authParams);
 
                 // If authentication succeed and database name is 'admin' -
                 // then user is admin, otherwise user is not admin
-                std::string dbName = _connection->primaryCredential()->databaseName();
+                std::string dbName = credentials->databaseName();
                 std::transform(dbName.begin(), dbName.end(), dbName.begin(), ::tolower);
                 if (dbName.compare("admin") != 0) // dbName is NOT "admin"
                     _isAdmin = false;
             }
+
             boost::scoped_ptr<MongoClient> client(getClient());
-            //conn->done();
             std::vector<std::string> dbNames = getDatabaseNamesSafe();
-            reply(event->sender(), new EstablishConnectionResponse(this, ConnectionInfo(_connection->getFullAddress(), dbNames, client->getVersion()) ));
-        } catch(const std::exception &ex) {
-            reply(event->sender(), new EstablishConnectionResponse(this, EventError("Unable to connect to MongoDB")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+
+            // If we do not have databases, it means that we are unable to
+            // execute "listdatabases" command and we have nothing to show.
+            if (dbNames.size() == 0)
+                throw std::runtime_error("Failed to execute \"listdatabases\" command.");
+
+            if (!_connSettings->isReplicaSet())
+                init(); // Init MongoWorker for single server (for replica set connections early init is used)
+
+            resetGlobalSSLparams();
+
+            auto connInfo = ConnectionInfo(_connSettings->getFullAddress(), dbNames, client->getVersion(), 
+                                           client->dbVersionStr(), client->getStorageEngineType(), event->uuid);
+
+            // todo: two ctors for rep.set and single server.
+            reply(event->sender(), new EstablishConnectionResponse(this, connInfo, event->connectionType, 
+                                                                   *repSetInfo.release()));
+            return true;
+        } 
+        catch(const std::exception &ex) {
+            resetGlobalSSLparams();
+            auto errorReason = _connSettings->sslSettings()->sslEnabled() ?
+                               EstablishConnectionResponse::ErrorReason::MongoSslConnection : 
+                               EstablishConnectionResponse::ErrorReason::MongoAuth;
+
+            reply(event->sender(), new EstablishConnectionResponse(this, EventError(ex.what(), errorCode), 
+                  event->connectionType, ConnectionInfo(event->uuid), *repSetInfo.release(), errorReason));
         }
+
+        return false;
+    }
+
+    void MongoWorker::handle(RefreshReplicaSetFolderRequest *event)
+    {
+		configureSSL();
+        ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+
+        // Primary is unreachable, but there might be reachable secondary(ies)
+        if (replicaSetInfo.primary.empty()) {  
+            reply(event->sender(), new RefreshReplicaSetFolderResponse(this, replicaSetInfo, event->expanded,
+                                                                       EventError(replicaSetInfo.errorStr)));
+            LOG_MSG(replicaSetInfo.errorStr, mongo::logger::LogSeverity::Error());
+            return;
+        }
+        else // Primary is reachable
+            reply(event->sender(), new RefreshReplicaSetFolderResponse(this, replicaSetInfo, event->expanded));
     }
 
     std::string MongoWorker::getAuthBase() const
     {
-        bool hasPrimary = _connection->hasEnabledPrimaryCredential();
-        if(hasPrimary){
-            return _connection->primaryCredential()->databaseName();
-        }
+        if (_connSettings->hasEnabledPrimaryCredential())
+            return _connSettings->primaryCredential()->databaseName();
+
         return std::string();
     }
 
@@ -143,19 +317,16 @@ namespace Robomongo
         DatabasesContainerType result;
         std::string authBase = getAuthBase();
         if (!_isAdmin && !authBase.empty()) {
-            result.push_back(_connection->primaryCredential()->databaseName());
+            result.push_back(_connSettings->primaryCredential()->databaseName());
             return result;
         }
 
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
             result = client->getDatabaseNames();
-        }
-        catch(const std::exception &ex)
-        {
-            if(!authBase.empty())
+        } catch(const std::exception &) {
+            if (!authBase.empty())
                 result.push_back(authBase);
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
         }
         return result;
     }
@@ -165,14 +336,32 @@ namespace Robomongo
      */
     void MongoWorker::handle(LoadDatabaseNamesRequest *event)
     {
-        // If user not an admin - he doesn't have access to mongodb 'listDatabases' command
-        // Non admin user has access only to the single database he specified while performing auth.
-        std::vector<std::string> dbNames = getDatabaseNamesSafe();
-            
-        if(dbNames.size()){
-            reply(event->sender(), new LoadDatabaseNamesResponse(this, dbNames));
-        }else{
-            reply(event->sender(), new LoadDatabaseNamesResponse(this, EventError("Unable to load database names.")));
+        try {
+            // If user not an admin - he doesn't have access to mongodb 'listDatabases' command
+            // Non admin user has access only to the single database he specified while performing auth.
+            std::vector<std::string> dbNames = getDatabaseNamesSafe();
+
+            // Remove from list of created databases existing databases
+            for (std::vector<std::string>::iterator it = dbNames.begin(); it != dbNames.end(); ++it) {
+                std::unordered_set<std::string>::const_iterator exists = _createdDbs.find(*it);
+                if (exists != _createdDbs.end()) {
+                    _createdDbs.erase(*it);
+                }
+            }
+
+            // Merge with list of created databases
+            for (std::unordered_set<std::string>::iterator it = _createdDbs.begin(); it != _createdDbs.end(); ++it) {
+                dbNames.push_back(*it);
+            }
+
+            if (dbNames.size()) {
+                reply(event->sender(), new LoadDatabaseNamesResponse(this, dbNames));
+            } else {
+                reply(event->sender(), new LoadDatabaseNamesResponse(this, EventError("Failed to execute \"listdatabases\" command.")));
+            }
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new LoadDatabaseNamesResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
@@ -184,14 +373,23 @@ namespace Robomongo
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
 
-            std::vector<std::string> stringList = client->getCollectionNames(event->databaseName());
-            const std::vector<MongoCollectionInfo> &infos = client->runCollStatsCommand(stringList);
+            auto const& namespaces = client->getCollectionNamesWithDbname(event->databaseName());
+            std::vector<MongoCollectionInfo> const& collInfos = client->runCollStatsCommand(namespaces);
             client->done();
 
-            reply(event->sender(), new LoadCollectionNamesResponse(this, event->databaseName(), infos));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadCollectionNamesResponse(this, EventError("Unable to load list of collections.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new LoadCollectionNamesResponse(this, event->databaseName(), collInfos));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new LoadCollectionNamesResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new LoadCollectionNamesResponse(this, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new LoadCollectionNamesResponse(this, EventError(ex.what())));
         }
     }
 
@@ -203,9 +401,18 @@ namespace Robomongo
             client->done();
 
             reply(event->sender(), new LoadUsersResponse(this, event->databaseName(), users));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadUsersResponse(this, EventError("Unable to load list of users.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new LoadUsersResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new LoadUsersResponse(this, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new LoadUsersResponse(this, EventError(ex.what())));
         }
     }
 
@@ -217,9 +424,9 @@ namespace Robomongo
             client->done();
 
             reply(event->sender(), new LoadCollectionIndexesResponse(this, ind));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadCollectionIndexesResponse(this, std::vector<EnsureIndexInfo>()));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new LoadCollectionIndexesResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
@@ -229,14 +436,14 @@ namespace Robomongo
         const EnsureIndexInfo &oldInfo = event->oldInfo();
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->ensureIndex(oldInfo,newInfo);
+            client->ensureIndex(oldInfo, newInfo);
             const std::vector<EnsureIndexInfo> &ind = client->getIndexes(newInfo._collection);
             client->done();
 
             reply(event->sender(), new LoadCollectionIndexesResponse(this, ind));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadCollectionIndexesResponse(this, std::vector<EnsureIndexInfo>()));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new LoadCollectionIndexesResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
@@ -244,12 +451,12 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->dropIndexFromCollection(event->collection(),event->name());
+            client->dropIndexFromCollection(event->collection(), event->name());
             client->done();
             reply(event->sender(), new DeleteCollectionIndexResponse(this, event->collection(), event->name()));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DeleteCollectionIndexResponse(this, event->collection(), std::string() ));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new DeleteCollectionIndexResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }            
     }
 
@@ -257,14 +464,14 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->renameIndexFromCollection(event->collection(),event->oldIndex(),event->newIndex());
+            client->renameIndexFromCollection(event->collection(), event->oldIndex(), event->newIndex());
             const std::vector<EnsureIndexInfo> &ind = client->getIndexes(event->collection());
             client->done();
 
             reply(event->sender(), new LoadCollectionIndexesResponse(this, ind));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadCollectionIndexesResponse(this, std::vector<EnsureIndexInfo>()));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new LoadCollectionIndexesResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         } 
     }
 
@@ -272,13 +479,35 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            const std::vector<MongoFunction> &funs = client->getFunctions(event->databaseName());
+            const std::vector<MongoFunction> &funcs = client->getFunctions(event->databaseName());
             client->done();
 
-            reply(event->sender(), new LoadFunctionsResponse(this, event->databaseName(), funs));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new LoadFunctionsResponse(this, EventError("Unable to load list of functions.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            // If list of functions from client is empty, try getting it with script engine
+            if (funcs.empty()) {
+                MongoShellExecResult const& result = _scriptEngine->exec("db.system.js.find()", event->databaseName());
+                std::vector<MongoFunction> functions;
+                if (!result.results().empty()) {
+                    auto const& resultDocs = result.results().front().documents();
+                    for (auto const res : resultDocs)
+                        functions.push_back(MongoFunction(res->bsonObj()));
+                }
+                reply(event->sender(), new LoadFunctionsResponse(this, event->databaseName(), functions));
+                return;
+            }
+
+            reply(event->sender(), new LoadFunctionsResponse(this, event->databaseName(), funcs));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new LoadFunctionsResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new LoadFunctionsResponse(this, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new LoadFunctionsResponse(this, EventError(ex.what())));
         }
     }
 
@@ -286,18 +515,37 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
+    
+            // Added after Mongo 4.0 due to connection problems after first edit/insert/remove operation
+            bool replicaSetConnectionWithAuth = false;
+            if (_connSettings->isReplicaSet()) {
+                restartReplicaSetConnection();  
+                if (_connSettings->hasEnabledPrimaryCredential())
+                    replicaSetConnectionWithAuth = true;
+            }
 
             if (event->overwrite())
-                client->saveDocument(event->obj(), event->ns());
+                client->saveDocument(event->obj(), event->ns(), replicaSetConnectionWithAuth);
             else
-                client->insertDocument(event->obj(), event->ns());
+                client->insertDocument(event->obj(), event->ns(), replicaSetConnectionWithAuth);
 
             client->done();
-
             reply(event->sender(), new InsertDocumentResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new InsertDocumentResponse(this, EventError("Unable to insert document.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } 
+        catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new InsertDocumentResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else    // other errors
+                    reply(event->sender(), new InsertDocumentResponse(this, EventError(ex.what())));
+            }
+            else { // single server
+                    reply(event->sender(), new InsertDocumentResponse(this, 
+                          EventError("Error when saving document: " + std::string(ex.what()))));
+            }
         }
     }
 
@@ -306,13 +554,34 @@ namespace Robomongo
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
 
-            client->removeDocuments(event->ns(), event->query(), event->justOne());
+            // Added after Mongo 4.0 due to connection problems after first edit/insert/remove operation
+            bool replicaSetConnectionWithAuth = false;
+            if (_connSettings->isReplicaSet()) {
+                restartReplicaSetConnection();
+                if (_connSettings->hasEnabledPrimaryCredential())
+                    replicaSetConnectionWithAuth = true;
+            }
+
+            client->removeDocuments(event->ns(), event->query(), replicaSetConnectionWithAuth, 
+                                    event->removeCount() == RemoveDocumentCount::ONE);
             client->done();
 
-            reply(event->sender(), new RemoveDocumentResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new RemoveDocumentResponse(this, EventError("Unable to remove documents.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new RemoveDocumentResponse(this, event->removeCount(), event->index()));
+        } 
+        catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new RemoveDocumentResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false), event->removeCount(), event->index()));
+                }
+                else // other errors
+                    reply(event->sender(), new RemoveDocumentResponse(this, EventError(ex.what()), 
+                          event->removeCount(), event->index()));
+            }
+            else // single server
+                reply(event->sender(), new RemoveDocumentResponse(this,
+                      EventError("Error when deleting document: " + std::string(ex.what())), event->removeCount(), event->index()));
         }
     }
 
@@ -324,9 +593,9 @@ namespace Robomongo
             client->done();
 
             reply(event->sender(), new ExecuteQueryResponse(this, event->resultIndex(), event->queryInfo(), docs));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new ExecuteQueryResponse(this, EventError("Unable to complete query.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new ExecuteQueryResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
@@ -334,38 +603,130 @@ namespace Robomongo
      * @brief Execute javascript
      */
     void MongoWorker::handle(ExecuteScriptRequest *event)
+    {        
+        try {
+            if (!_scriptEngine) {
+                reply(event->sender(), 
+                    new ExecuteScriptResponse(this, EventError("MongoDB Shell was not initialized")));
+                return;
+            }
+
+            // Try to handle case where new shell (which was opened when server unreachable) was re-executed
+            if (_scriptEngine->failedScope()) {
+                try {
+                    _scriptEngine->init(_isLoadMongoRcJs);
+                }
+                catch (std::exception const& ex) {     
+                    LOG_MSG(captilizeFirstChar(ex.what()) + ", cannot init mongo scope", 
+                            mongo::logger::LogSeverity::Error());
+                }
+            }
+
+            AggrInfo const& aggrInfo = event->aggrInfo;
+            
+            // todo: should we use dbName from event or _connSettings? 
+            MongoShellExecResult result = 
+                _scriptEngine->exec(event->script, _connSettings->defaultDatabase(), aggrInfo);
+                       
+            // To fix the problem where 'result' comes with old primary address.
+            if (_connSettings->isReplicaSet()) 
+                result.setCurrentServer(_dbclientRepSet->getSuspectedPrimaryHostAndPort().toString());
+
+            // Robomongo shell timeout
+            bool timeoutReached = false;
+            if (result.timeoutReached()) 
+                timeoutReached = true;          
+
+            if (result.error()) {
+                // If this is replica set, update script engine and try again
+                if (_connSettings->isReplicaSet()) {
+                    ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                    if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                        reply(event->sender(), 
+                            new ExecuteScriptResponse(this, EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                        return;
+                    }
+                    else {  // primary reachable
+                        _scriptEngine->init(_isLoadMongoRcJs, replicaSetInfo.primary.toString(),
+                                            _connSettings->defaultDatabase());
+                        result = _scriptEngine->exec(event->script, _connSettings->defaultDatabase());
+                        if(result.error()) 
+                            reply(event->sender(),
+                                new ExecuteScriptResponse(this, EventError(result.errorMessage())));
+                    }
+                }
+                else { // single server
+                    reply(event->sender(), 
+                        new ExecuteScriptResponse(this, EventError(result.errorMessage())));
+                    return;
+                }
+            }
+
+            reply(event->sender(), new ExecuteScriptResponse(this, result, event->script.empty(),
+                                                             timeoutReached));
+        } 
+        catch(const std::exception &ex) {
+            reply(event->sender(), new ExecuteScriptResponse(this, EventError(ex.what(), 
+                                                             EventError::Unknown, false)));
+        }
+    }
+
+    /**
+     * @brief Interrupt javascript execution
+     */
+    void MongoWorker::handle(StopScriptRequest *)
     {
         try {
-            MongoShellExecResult result = _scriptEngine->exec(event->script, event->databaseName);
-            reply(event->sender(), new ExecuteScriptResponse(this, result, event->script.empty()));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new ExecuteScriptResponse(this, EventError("Unable to complete query.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            if (!_scriptEngine) {
+                return;
+            }
+
+            _scriptEngine->interrupt();
+        } catch(const std::exception &ex) {
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
     void MongoWorker::handle(AutocompleteRequest *event)
     {
         try {
+            if (!_scriptEngine) {
+                reply(event->sender(), new AutocompleteResponse(this, EventError("MongoDB Shell was not initialized")));
+                return;
+            }
+
             QStringList list = _scriptEngine->complete(event->prefix, event->mode);
             reply(event->sender(), new AutocompleteResponse(this, list, event->prefix));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new ExecuteScriptResponse(this, EventError("Unable to autocomplete query.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new AutocompleteResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
     void MongoWorker::handle(CreateDatabaseRequest *event)
     {
+        std::string dbname = event->database();
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->createDatabase(event->database());
-            client->done();
+            client->createDatabase(dbname);
 
-            reply(event->sender(), new CreateDatabaseResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new CreateDatabaseResponse(this, EventError("Unable to create database.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            // Insert to list of created database. Read docs for this hashset in the header
+            _createdDbs.insert(dbname);
+
+            reply(event->sender(), new CreateDatabaseResponse(this, dbname));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new CreateDatabaseResponse(this, dbname,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else    // other errors
+                    reply(event->sender(), new CreateDatabaseResponse(this, dbname, 
+                                                                      EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new CreateDatabaseResponse(this, dbname, EventError(ex.what())));
         }
     }
 
@@ -373,41 +734,76 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->dropDatabase(event->database());
-            client->done();
+            client->dropDatabase(event->database);
 
-            reply(event->sender(), new DropDatabaseResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DropDatabaseResponse(this, EventError("Unable to drop database.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            // Remove from the list of created database, Read docs for this hashset in the header
+            _createdDbs.erase(event->database);
+
+            reply(event->sender(), new DropDatabaseResponse(this, event->database));
+        } 
+        catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new DropDatabaseResponse(this, event->database,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new DropDatabaseResponse(this, event->database, EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new DropDatabaseResponse(this, event->database, EventError(ex.what())));
         }
     }
 
     void MongoWorker::handle(CreateCollectionRequest *event)
     {
+        std::string const& collection = event->ns().collectionName();
+
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->createCollection(event->ns());
+            client->createCollection(event->ns().toString(), event->getSize(), event->getCapped(),
+                event->getMaxDocNum(), event->getExtraOptions());
             client->done();
 
-            reply(event->sender(), new CreateCollectionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new CreateCollectionResponse(this, EventError("Unable to create collection.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new CreateCollectionResponse(this, collection));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new CreateCollectionResponse(this, collection,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new CreateCollectionResponse(this, collection, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new CreateCollectionResponse(this, collection, EventError(ex.what())));
         }
     }
 
     void MongoWorker::handle(DropCollectionRequest *event)
     {
+        std::string const& collection = event->ns().collectionName();
+
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
             client->dropCollection(event->ns());
             client->done();
 
-            reply(event->sender(), new DropCollectionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DropCollectionResponse(this, EventError("Unable to drop collection.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new DropCollectionResponse(this, collection));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new DropCollectionResponse(this, collection,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new DropCollectionResponse(this, collection, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new DropCollectionResponse(this, collection, EventError(ex.what())));
         }
     }
 
@@ -418,24 +814,46 @@ namespace Robomongo
             client->renameCollection(event->ns(), event->newCollection());
             client->done();
 
-            reply(event->sender(), new RenameCollectionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new RenameCollectionResponse(this, EventError("Unable to rename collection.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new RenameCollectionResponse(this, event->ns().collectionName(),
+                                                                event->newCollection()));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new RenameCollectionResponse(this,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else // other errors
+                    reply(event->sender(), new RenameCollectionResponse(this, EventError(ex.what())));
+            }
+            else // single server
+                reply(event->sender(), new RenameCollectionResponse(this, EventError(ex.what())));
         }
     }
 
     void MongoWorker::handle(DuplicateCollectionRequest *event)
     {
+        std::string const& sourceCollection = event->ns().collectionName();
+
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
             client->duplicateCollection(event->ns(), event->newCollection());
             client->done();
 
-            reply(event->sender(), new DuplicateCollectionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DuplicateCollectionResponse(this, EventError("Unable to duplicate collection.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new DuplicateCollectionResponse(this, sourceCollection, event->newCollection()));
+        }
+        catch (const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new DuplicateCollectionResponse(this, sourceCollection,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else    // other errors
+                    reply(event->sender(), new DuplicateCollectionResponse(this, sourceCollection, EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new DuplicateCollectionResponse(this, sourceCollection, EventError(ex.what())));
         }
     }
 
@@ -444,13 +862,13 @@ namespace Robomongo
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
             MongoWorker *cl = event->worker();
-            client->copyCollectionToDiffServer(cl->_dbclient,event->from(),event->to());
+            client->copyCollectionToDiffServer(cl->_dbclient.get(), event->from(), event->to());
             client->done();
 
             reply(event->sender(), new CopyCollectionToDiffServerResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new CopyCollectionToDiffServerResponse(this, EventError("Unable to copy collection.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        } catch(const std::exception &ex) {
+            reply(event->sender(), new CopyCollectionToDiffServerResponse(this, EventError(ex.what())));
+            LOG_MSG(ex.what(), mongo::logger::LogSeverity::Error());
         }
     }
 
@@ -458,13 +876,24 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->createUser(event->database(), event->user(), event->overwrite());
+            client->createUser(event->database(), event->user());
             client->done();
 
-            reply(event->sender(), new CreateUserResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new CreateUserResponse(this, EventError("Unable to create/ovewrite user.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new CreateUserResponse(this, event->user().name()));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new CreateUserResponse(this, event->user().name(),
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else   // other errors
+                    reply(event->sender(), new CreateUserResponse(this, event->user().name(), 
+                                                                  EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new CreateUserResponse(this, event->user().name(), 
+                                                              EventError(ex.what())));
         }
     }
 
@@ -472,57 +901,260 @@ namespace Robomongo
     {
         try {
             boost::scoped_ptr<MongoClient> client(getClient());
-            client->dropUser(event->database(), event->id());
+            client->dropUser(event->database(), event->username());
             client->done();
 
-            reply(event->sender(), new DropUserResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DropUserResponse(this, EventError("Unable to drop user.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new DropUserResponse(this, event->username()));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new DropUserResponse(this, event->username(),
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else   // other errors
+                    reply(event->sender(), new DropUserResponse(this, event->username(), EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new DropUserResponse(this, event->username(), EventError(ex.what())));
         }
     }
 
     void MongoWorker::handle(CreateFunctionRequest *event)
     {
-        try {
-            boost::scoped_ptr<MongoClient> client(getClient());
-            client->createFunction(event->database(), event->function(), event->existingFunctionName());
-            client->done();
+        std::string const& functionName = event->function().name();
 
-            reply(event->sender(), new CreateFunctionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new CreateFunctionResponse(this, EventError("Unable to create/ovewrite function.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+        try {
+            if (event->dbVersion() >= 3.4) {
+                auto const cmd = "db.system.js.save(" + event->function().toBson().toString() + ')';
+                MongoShellExecResult const& result = _scriptEngine->exec(cmd, event->database());
+                if (result.error())
+                    throw std::runtime_error(result.errorMessage());
+            }
+            else {
+                boost::scoped_ptr<MongoClient> client(getClient());
+                client->createFunction(event->database(), event->function(), event->existingFunctionName());
+                client->done();
+            }
+
+            reply(event->sender(), new CreateFunctionResponse(this, functionName));
+        } catch(const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new CreateFunctionResponse(this, functionName,
+                          EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else    // other errors
+                    reply(event->sender(), new CreateFunctionResponse(this, functionName, EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new CreateFunctionResponse(this, functionName, EventError(ex.what())));
         }
     }
 
     void MongoWorker::handle(DropFunctionRequest *event)
     {
         try {
-            boost::scoped_ptr<MongoClient> client(getClient());
-            client->dropFunction(event->database(), event->name());
-            client->done();
+            if (event->dbVersion() >= 3.4) {
+                auto const cmd = "db.system.js.remove( { _id : \"" + event->functionName() + "\" } )";
+                MongoShellExecResult const& result = _scriptEngine->exec(cmd, event->database());
+                if (result.error())
+                    throw std::runtime_error(result.errorMessage());
+            }
+            else {
+                boost::scoped_ptr<MongoClient> client(getClient());
+                client->dropFunction(event->database(), event->functionName());
+                client->done();
+            }
 
-            reply(event->sender(), new DropFunctionResponse(this));
-        } catch(const mongo::DBException &ex) {
-            reply(event->sender(), new DropFunctionResponse(this, EventError("Unable to drop function.")));
-            LOG_MSG(ex.what(), mongo::LL_ERROR);
+            reply(event->sender(), new DropFunctionResponse(this, event->functionName()));
+        }
+        catch (const std::exception &ex) {
+            if (_connSettings->isReplicaSet()) {
+                ReplicaSet const& replicaSetInfo = getReplicaSetInfo(true);
+                if (replicaSetInfo.primary.empty()) {  // primary not reachable
+                    reply(event->sender(), new DropFunctionResponse(this, event->functionName(),
+                        EventError(PRIMARY_UNREACHABLE, replicaSetInfo, false)));
+                }
+                else  // other errors
+                    reply(event->sender(), new DropFunctionResponse(this, event->functionName(), EventError(ex.what())));
+            }
+            else  // single server
+                reply(event->sender(), new DropFunctionResponse(this, event->functionName(), EventError(ex.what())));
         }
     }
 
-    mongo::DBClientConnection *MongoWorker::getConnection()
+    std::pair<mongo::DBClientBase*, std::string> MongoWorker::getConnection(bool mayReturnNull /* = false */)
     {
-        if (!_dbclient) {
-            mongo::DBClientConnection *conn = new mongo::DBClientConnection(true);
-            conn->connect(_connection->info());
-            _dbclient = conn;
+        configureSSL();
+
+        // --- Perform connection ---
+        if (_connSettings->isReplicaSet()) // connection to replica set 
+        {  
+            if (!_dbclientRepSet) 
+            {
+                init(); // Init mongoworker for early-use of _scriptEngine
+
+                // Step-1: Use user entered set name or retrieve set name from cache or from a reachable member
+                std::string setName = _connSettings->replicaSetSettings()->setNameUserEntered();
+                if (setName.empty()) {
+                    setName = _connSettings->replicaSetSettings()->cachedSetName();
+                    if (setName.empty()) // If there is no cached set name, get it from an on-line replica node
+                        setName = connectAndGetReplicaSetName();
+
+                    if (setName.empty())   // It is not possible to continue with empty set name
+                        return{ nullptr, "It is not possible to continue with empty set name" };
+                }
+
+                // Step-2: Try connect to replica set with set name
+                auto const& membersHostsAndPorts = _connSettings->replicaSetSettings()->membersToHostAndPort();
+                _dbclientRepSet = DBClientReplicaSet(new mongo::DBClientReplicaSet(setName, membersHostsAndPorts, 
+                                                     "robo3t", _mongoTimeoutSec));
+                
+                if (!_dbclientRepSet->connect()) 
+                    return{ nullptr, "Connect failed" };
+            }
+            return { _dbclientRepSet.get(), ""};
         }
-        return _dbclient;
+        else {  // connection to single server
+            if (!_dbclient) {
+                // Timeout for operations
+                // Connect timeout is fixed, but short, at 5 seconds (see headers for DBClientConnection)
+                _dbclient = DBClientConnection(new mongo::DBClientConnection(true, _mongoTimeoutSec));
+
+                mongo::Status const& status = _dbclient->connect(_connSettings->hostAndPort(), "robo3t");
+                if (!status.isOK() && mayReturnNull) 
+                    return{ nullptr, status.reason() };
+            }
+            return{ _dbclient.get(), "" };
+        }
     }
 
     MongoClient *MongoWorker::getClient()
     {
-        return new MongoClient(getConnection());
+        return new MongoClient(getConnection().first);
+    }
+
+    void MongoWorker::configureSSL()
+    {
+        // As a precaution reset SSL global params for any kind of connection request (SSL or non-SSL)
+        resetGlobalSSLparams();
+        // Update global SSL mode and global mongo SSL settings
+        if (_connSettings->sslSettings()->sslEnabled()) {
+            // Force SSL mode for outgoing connections
+            mongo::sslGlobalParams.sslMode.store(mongo::SSLParams::SSLMode_requireSSL);
+            updateGlobalSSLparams();
+        }
+        else {
+            // Disable forced SSL mode for outgoing connections
+            mongo::sslGlobalParams.sslMode.store(mongo::SSLParams::SSLMode_allowSSL);
+        }
+    }
+
+    void MongoWorker::updateGlobalSSLparams() const
+    {
+        resetGlobalSSLparams();
+        const SslSettings * const sslSettings = _connSettings->sslSettings();
+        mongo::sslGlobalParams.sslAllowInvalidCertificates = sslSettings->allowInvalidCertificates();
+        if (!mongo::sslGlobalParams.sslAllowInvalidCertificates)
+        {
+            mongo::sslGlobalParams.sslCAFile = sslSettings->caFile();
+        }
+        if (sslSettings->usePemFile())
+        {
+            mongo::sslGlobalParams.sslPEMKeyFile = sslSettings->pemKeyFile();
+            mongo::sslGlobalParams.sslPEMKeyPassword = sslSettings->pemPassPhrase();
+        }
+        if (sslSettings->useAdvancedOptions())
+        {
+            mongo::sslGlobalParams.sslCRLFile = sslSettings->crlFile();
+            mongo::sslGlobalParams.sslAllowInvalidHostnames = sslSettings->allowInvalidHostnames();
+        }
+    }
+
+    void MongoWorker::resetGlobalSSLparams() const
+    {
+        mongo::sslGlobalParams.sslAllowInvalidCertificates = false;
+        mongo::sslGlobalParams.sslCAFile = "";
+        mongo::sslGlobalParams.sslPEMKeyFile = "";
+        mongo::sslGlobalParams.sslPEMKeyPassword = "";
+        mongo::sslGlobalParams.sslCRLFile = "";
+        mongo::sslGlobalParams.sslAllowInvalidHostnames = false;
+    }
+
+    ReplicaSet MongoWorker::getReplicaSetInfo(bool refresh /*= true*/) const
+    {
+        std::string setName;
+        mongo::HostAndPort primary;
+        std::vector<std::pair<std::string, bool>> membersAndHealths;
+
+        // Refresh view of Replica Set Monitor to get live data
+        auto repSetMonitor = mongo::globalRSMonitorManager.getMonitor(_dbclientRepSet->getSetName());
+        
+        // Handle long lasting (e.g. overnight) connections which causes replica set monitor to be null
+        if (!repSetMonitor) {
+            mongo::ReplicaSetMonitor::createIfNeeded(_dbclientRepSet->getSetName(),
+                                                     _connSettings->replicaSetSettings()->membersToHostAndPortAsSet());
+            repSetMonitor = mongo::globalRSMonitorManager.getMonitor(_dbclientRepSet->getSetName());
+            if (!repSetMonitor) // if nullptr again even if the set is reachable, something went really wrong.
+                return ReplicaSet(setName, primary, membersAndHealths, 
+                                  "Unexpected error. Unable to get replica set monitor for set name: " + 
+                                  _dbclientRepSet->getSetName() + "\nPlease open a new connection.");
+        }
+
+        // refreshAll() takes long time, in order to do first establish connection request much faster
+        // refreshAll() will be by-passed first and it will/must be done after a successful connection.
+        if (refresh)
+            repSetMonitor->startOrContinueRefresh().refreshAll();
+
+        setName = repSetMonitor->getName();
+        auto const primaryOnly = mongo::ReadPreferenceSetting(mongo::ReadPreference::PrimaryOnly, mongo::TagSet());
+        auto primaryWithStatus = repSetMonitor->getHostOrRefresh(primaryOnly, mongo::Milliseconds(2000)); // todo
+        if (primaryWithStatus.isOK())
+            primary = primaryWithStatus.getValue();
+
+        QStringList servers;
+        // i.e. setNameAndMembers: "repset/localhost:27017,localhost:27018,localhost:27019"
+        auto setNameAndMembers = QString::fromStdString(repSetMonitor->getServerAddress());
+        QStringList result = setNameAndMembers.split("/");
+        if (result.size() > 1) 
+            servers = result[1].split(",");
+
+        // Save address and health of replica members
+        for (QString const& server : servers) {
+            auto hostAndPort = mongo::HostAndPort(mongo::StringData(server.toStdString()));
+            membersAndHealths.push_back({ server.toStdString(), repSetMonitor->isHostUp(hostAndPort) });
+        }
+
+        return ReplicaSet(setName, primary, membersAndHealths, primaryWithStatus.getStatus().reason());
+    }
+
+    std::string MongoWorker::connectAndGetReplicaSetName() const
+    {
+        auto dbclientTemp = DBClientConnection(new mongo::DBClientConnection(true, 10));
+        std::string setName = "";
+
+        // Try connecting to the nodes one by one until getting replica set name.
+        for (auto const& node : _connSettings->replicaSetSettings()->membersToHostAndPort())
+        {
+            mongo::Status const status = dbclientTemp->connect(node, "robo3t");
+            if (status.isOK())
+            {
+                _scriptEngine->init(_isLoadMongoRcJs, node.toString());
+                MongoShellExecResult const& result = _scriptEngine->exec("rs.status()", "");
+                if (!result.results().empty()) {
+                    auto const& resultDocs = result.results().front().documents();
+                    if (!resultDocs.empty()) {
+                        setName = resultDocs.front()->bsonObj().getStringField("set");
+                        if (!setName.empty()) // We get the information, finish the loop
+                            break;
+                    }
+                }
+            }
+        }
+
+        return setName;
     }
 
     /**
@@ -530,6 +1162,9 @@ namespace Robomongo
      */
     void MongoWorker::send(Event *event)
     {
+        if (_isQuiting)
+            return;
+
         AppRegistry::instance().bus()->send(this, event);
     }
 
@@ -538,6 +1173,24 @@ namespace Robomongo
      */
     void MongoWorker::reply(QObject *receiver, Event *event)
     {
+        if (_isQuiting)
+            return;
+
         AppRegistry::instance().bus()->send(receiver, event);
+    }
+
+    void MongoWorker::pingDatabase(mongo::DBClientBase *dbclient) const
+    {
+        // Building { ping: 1 }
+        mongo::BSONObjBuilder command;
+        command.append("ping", 1);
+        mongo::BSONObj result;
+        std::string authBase = getAuthBase();
+        if (authBase.empty()) {
+            dbclient->runCommand("admin", command.obj(), result);
+        }
+        else {
+            dbclient->runCommand(authBase, command.obj(), result);
+        }
     }
 }

@@ -16,8 +16,17 @@
 #include <QLabel>
 #include <QStatusBar>
 #include <QHBoxLayout>
+#include <QSettings>
+#include <QSystemTrayIcon>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QUrl>
+#include <QTextDocument>
 
+#include <mongo/logger/log_severity.h>
 #include "robomongo/core/settings/SettingsManager.h"
+#include "robomongo/core/settings/SshSettings.h"
 #include "robomongo/core/domain/MongoServer.h"
 #include "robomongo/core/domain/App.h"
 #include "robomongo/core/AppRegistry.h"
@@ -27,11 +36,17 @@
 
 #include "robomongo/gui/widgets/LogWidget.h"
 #include "robomongo/gui/widgets/explorer/ExplorerWidget.h"
+#include "robomongo/gui/widgets/explorer/ExplorerCollectionTreeItem.h"
+#include "robomongo/gui/widgets/explorer/ExplorerTreeWidget.h"
 #include "robomongo/gui/widgets/workarea/WorkAreaTabWidget.h"
 #include "robomongo/gui/widgets/workarea/QueryWidget.h"
+#include "robomongo/gui/widgets/workarea/QueryWidget.h"
+#include "robomongo/gui/widgets/workarea/WelcomeTab.h"
 #include "robomongo/gui/dialogs/ConnectionsDialog.h"
 #include "robomongo/gui/dialogs/AboutDialog.h"
 #include "robomongo/gui/dialogs/PreferencesDialog.h"
+#include "robomongo/gui/dialogs/ExportDialog.h"
+#include "robomongo/gui/dialogs/ChangeShellTimeoutDialog.h"
 #include "robomongo/gui/GuiRegistry.h"
 #include "robomongo/gui/AppStyle.h"
 
@@ -65,21 +80,32 @@ namespace
         Robomongo::AppRegistry::instance().settingsManager()->save();
     }
 
+    void saveMinimizeToTraySettings(bool isMinimizingToTray)
+    {
+        Robomongo::AppRegistry::instance().settingsManager()->setMinimizeToTray(isMinimizingToTray);
+        Robomongo::AppRegistry::instance().settingsManager()->save();
+    }
+
     void saveLineNumbers(bool showLineNumbers)
     {
         Robomongo::AppRegistry::instance().settingsManager()->setLineNumbers(showLineNumbers);
         Robomongo::AppRegistry::instance().settingsManager()->save();
     }
-}
+
+
+} 
+/* End of anonymous namespace */
+
 
 namespace Robomongo
 {
+/* -------------------------------- ConnectionMenu ---------------------------- */
     class ConnectionMenu : public QMenu
     {
     public:
         ConnectionMenu(QWidget *parent) : QMenu(parent) {}
     protected:
-        virtual void keyPressEvent(QKeyEvent *event)
+        virtual void keyPressEvent(QKeyEvent *event) override
         {
             if (event->key() == Qt::Key_F12) {
                 hide();
@@ -90,23 +116,26 @@ namespace Robomongo
         }
     };
 
+/* -------------------------------- MainWindow --------------------------------- */
     MainWindow::MainWindow()
         : BaseClass(),
-        _app(AppRegistry::instance().app()),
-        _workArea(NULL),
-        _connectionsMenu(NULL)
-    {
-        AppRegistry::instance().bus()->subscribe(this, ConnectionFailedEvent::Type);
-        AppRegistry::instance().bus()->subscribe(this, ScriptExecutedEvent::Type);
-        AppRegistry::instance().bus()->subscribe(this, ScriptExecutingEvent::Type);
-        AppRegistry::instance().bus()->subscribe(this, QueryWidgetUpdatedEvent::Type);
-
+        _logDock(nullptr), _workArea(nullptr), _explorer(nullptr), _app(AppRegistry::instance().app()), 
+        _connectionsMenu(nullptr), _connectButton(nullptr), _viewMenu(nullptr), _toolbarsMenu(nullptr), 
+        _connectAction(nullptr), _openAction(nullptr), _saveAction(nullptr), _saveAsAction(nullptr),
+        _executeAction(nullptr), _stopAction(nullptr), _orientationAction(nullptr), _execToolBar(nullptr),
+        //_exportAction(nullptr), _importAction(nullptr), // Temporarily disabling export/import feature
+#if defined(Q_OS_WIN)
+        _trayIcon(nullptr),
+#endif
+        _allowExit(false)
+     {
         QColor background = palette().window().color();
         QString controlKey = "Ctrl";
 
     #if defined(Q_OS_MAC)
-        QString explorerColor = "#DEE3EA"; // was #CED6DF"
+        QString explorerColor = "#EFEFEF"; // was #CED6DF"
         controlKey = QChar(0x2318); // "Command" key aka Cauliflower
+        setUnifiedTitleAndToolBarOnMac(true);
     #elif defined(Q_OS_LINUX)
         QString explorerColor = background.darker(103).name();
     #else
@@ -116,9 +145,9 @@ namespace Robomongo
         qApp->setStyleSheet(QString(
             "QWidget#queryWidget { background-color:#E7E5E4; margin: 0px; padding:0px; } \n"
             "Robomongo--ExplorerTreeWidget#explorerTree { padding: 1px 0px 0px 0px; background-color: %1; border: 0px; } \n"
-            "QMainWindow::separator { background: #E7E5E4; width: 1px; } "
+            "QMainWindow::separator { background: #E7E5E4; width: 1px; } \n"
+            "QMessageBox { messagebox-text-interaction-flags: 5; }"  // Make QMessageBox text selectable
         ).arg(explorerColor));
-
         _openAction = new QAction(GuiRegistry::instance().openIcon(), tr("&Open..."), this);
         _openAction->setToolTip(QString("Load script from the file to the currently opened shell <b>(%1 + O)</b>").arg(controlKey));
         _openAction->setShortcuts(QKeySequence::Open);
@@ -136,7 +165,7 @@ namespace Robomongo
         // Exit action
         QAction *exitAction = new QAction("&Exit", this);
         exitAction->setShortcuts(QKeySequence::Quit);
-        VERIFY(connect(exitAction, SIGNAL(triggered()), this, SLOT(close())));
+        VERIFY(connect(exitAction, SIGNAL(triggered()), this, SLOT(exit())));
 
         // Connect action
         _connectAction = new QAction("&Connect...", this);
@@ -167,6 +196,26 @@ namespace Robomongo
         QWidgetAction *connectButtonAction = new QWidgetAction(this);
         connectButtonAction->setDefaultWidget(_connectButton);
 
+        // Tray icon
+    #if defined(Q_OS_WIN)
+        _trayIcon = new QSystemTrayIcon(GuiRegistry::instance().mainWindowIcon());
+        VERIFY(connect(_trayIcon, SIGNAL(activated(QSystemTrayIcon::ActivationReason)), 
+                       this, SLOT(trayActivated(QSystemTrayIcon::ActivationReason))));
+
+        auto trayMinimizeAction = new QAction("Minimize to Tray", _trayIcon);
+        VERIFY(connect(trayMinimizeAction, SIGNAL(triggered()), this, SLOT(toggleMinimize())));
+
+        auto trayExitAction = new QAction("Exit", _trayIcon);
+        VERIFY(connect(trayExitAction, SIGNAL(triggered()), this, SLOT(exit())));
+       
+        auto contextMenu = new QMenu();
+        contextMenu->addAction(trayMinimizeAction);
+        contextMenu->addSeparator();
+        contextMenu->addAction(trayExitAction);
+
+        _trayIcon->setContextMenu(contextMenu);
+    #endif
+
         // Orientation action
         _orientationAction = new QAction("&Rotate", this);
         _orientationAction->setShortcut(Qt::Key_F10);
@@ -178,7 +227,7 @@ namespace Robomongo
         ViewMode viewMode = AppRegistry::instance().settingsManager()->viewMode();
 
         // Text mode action
-        QAction *textModeAction = new QAction("&Text Mode", this);
+        auto textModeAction = new QAction("&Text Mode", this);
         textModeAction->setShortcut(Qt::Key_F4);
         textModeAction->setIcon(GuiRegistry::instance().textHighlightedIcon());
         textModeAction->setToolTip("Show current tab in text mode, and make this mode default for all subsequent queries <b>(F4)</b>");
@@ -325,17 +374,17 @@ namespace Robomongo
         AutocompletionMode autocompletionMode = AppRegistry::instance().settingsManager()->autocompletionMode();
 
         // Autocompletion
-        QAction *autocompletionAllAction = new QAction("All",this);
+        QAction *autocompletionAllAction = new QAction("All", this);
         autocompletionAllAction->setCheckable(true);
         autocompletionAllAction->setChecked(autocompletionMode == AutocompleteAll);
         VERIFY(connect(autocompletionAllAction, SIGNAL(triggered()), this, SLOT(setShellAutocompletionAll())));
 
-        QAction *autocompletionNoCollectionNamesAction = new QAction("All (Except Collection Names)",this);
+        QAction *autocompletionNoCollectionNamesAction = new QAction("All (Except Collection Names)", this);
         autocompletionNoCollectionNamesAction->setCheckable(true);
         autocompletionNoCollectionNamesAction->setChecked(autocompletionMode == AutocompleteNoCollectionNames);
         VERIFY(connect(autocompletionNoCollectionNamesAction, SIGNAL(triggered()), this, SLOT(setShellAutocompletionNoCollectionNames())));
 
-        QAction *autocompletionNoneAction = new QAction("None",this);
+        QAction *autocompletionNoneAction = new QAction("None", this);
         autocompletionNoneAction->setCheckable(true);
         autocompletionNoneAction->setChecked(autocompletionMode == AutocompleteNone);
         VERIFY(connect(autocompletionNoneAction, SIGNAL(triggered()), this, SLOT(setShellAutocompletionNone())));
@@ -350,7 +399,7 @@ namespace Robomongo
         autocompletionGroup->addAction(autocompletionNoCollectionNamesAction);
         autocompletionGroup->addAction(autocompletionNoneAction);
 
-        QAction *loadMongoRcJs = new QAction("Load .mongorc.js",this);
+        QAction *loadMongoRcJs = new QAction("Load .mongorc.js", this);
         loadMongoRcJs->setCheckable(true);
         loadMongoRcJs->setChecked(AppRegistry::instance().settingsManager()->loadMongoRcJs());
         VERIFY(connect(loadMongoRcJs, SIGNAL(triggered()), this, SLOT(setLoadMongoRcJs())));
@@ -371,19 +420,37 @@ namespace Robomongo
         VERIFY(connect(showLineNumbers, SIGNAL(triggered()), this, SLOT(toggleLineNumbers())));
         optionsMenu->addAction(showLineNumbers);
 
-        QAction *disabelConnectionShortcuts = new QAction("Disable Connection Shortcuts",this);
+        QAction *disabelConnectionShortcuts = new QAction("Disable Connection Shortcuts", this);
         disabelConnectionShortcuts->setCheckable(true);
         disabelConnectionShortcuts->setChecked(AppRegistry::instance().settingsManager()->disableConnectionShortcuts());
         VERIFY(connect(disabelConnectionShortcuts, SIGNAL(triggered()), this, SLOT(setDisableConnectionShortcuts())));
         optionsMenu->addAction(disabelConnectionShortcuts);
         
-        QAction *autoExec = new QAction(tr("Automatically execute code in new tab"),this);
+        QAction *autoExec = new QAction(tr("Automatically execute code in new tab"), this);
         autoExec->setCheckable(true);
         autoExec->setChecked(AppRegistry::instance().settingsManager()->autoExec());
         VERIFY(connect(autoExec, SIGNAL(triggered()), this, SLOT(toggleAutoExec())));
         optionsMenu->addAction(autoExec);
 
-        QAction *preferencesAction = new QAction("Preferences",this);
+    #if defined(Q_OS_WIN)
+        QAction *minimizeTray = new QAction("Close button should minimize to system tray");
+        minimizeTray->setCheckable(true);
+        minimizeTray->setChecked(AppRegistry::instance().settingsManager()->minimizeToTray());
+        VERIFY(connect(minimizeTray, SIGNAL(triggered()), this, SLOT(toggleMinimizeToTray())));
+        optionsMenu->addAction(minimizeTray);
+    #endif
+
+        auto checkUpdates = new QAction(tr("Check For Updates"), this);
+        checkUpdates->setCheckable(true);
+        checkUpdates->setChecked(AppRegistry::instance().settingsManager()->checkForUpdates());
+        VERIFY(connect(checkUpdates, SIGNAL(triggered()), this, SLOT(toggleCheckUpdates())));
+        optionsMenu->addAction(checkUpdates);
+
+        auto changeShellTimeout = new QAction(tr("Change Shell Timeout..."), this);
+        VERIFY(connect(changeShellTimeout, SIGNAL(triggered()), this, SLOT(openShellTimeoutDialog())));
+        optionsMenu->addAction(changeShellTimeout);
+
+        QAction *preferencesAction = new QAction("Preferences", this);
         VERIFY(connect(preferencesAction, SIGNAL(triggered()), this, SLOT(openPreferences())));
         preferencesAction->setVisible(false);
         optionsMenu->addAction(preferencesAction);
@@ -435,6 +502,12 @@ namespace Robomongo
         duplicateAction->setVisible(true);
         VERIFY(connect(duplicateAction, SIGNAL(triggered()), SLOT(duplicateTab())));
 
+        // Open welcome tab action
+        auto openWelcomeTabAction = new QAction("Open/Refresh Welcome Tab", this);
+        openWelcomeTabAction->setShortcut(Qt::CTRL + Qt::SHIFT + Qt::Key_W);
+        openWelcomeTabAction->setVisible(true);
+        VERIFY(connect(openWelcomeTabAction, SIGNAL(triggered()), SLOT(openWelcomeTab())));
+
         // Window menu
         QMenu *windowMenu = menuBar()->addMenu("Window");
         //minimize
@@ -446,12 +519,14 @@ namespace Robomongo
         windowMenu->addSeparator();
         windowMenu->addAction(reloadAction);
         windowMenu->addAction(duplicateAction);
+        windowMenu->addSeparator();
+        windowMenu->addAction(openWelcomeTabAction);
 
-        SettingsManager::ToolbarSettingsContainerType toolbarsSettings = AppRegistry::instance().settingsManager()->toolbars();
+        auto toolbarsSettings = AppRegistry::instance().settingsManager()->toolbars();
 
     /*** About menu ***/
 
-        QAction *aboutRobomongoAction = new QAction("&About Robomongo...", this);
+        QAction *aboutRobomongoAction = new QAction("&About Robo 3T...", this);
         VERIFY(connect(aboutRobomongoAction, SIGNAL(triggered()), this, SLOT(aboutRobomongo())));
 
         // Options menu
@@ -464,7 +539,7 @@ namespace Robomongo
         connectToolBar->addAction(connectButtonAction);
         connectToolBar->setShortcutEnabled(1, true);
         connectToolBar->setMovable(false);
-        connectToolBar->setVisible(toolbarsSettings["connect"].toBool());
+        connectToolBar->setVisible(true /*toolbarsSettings["connect"].toBool()*/);
         _toolbarsMenu->addAction(connectToolBar->toggleViewAction());
         VERIFY(connect(connectToolBar->toggleViewAction(), SIGNAL(triggered(bool)), this, SLOT(onConnectToolbarVisibilityChanged(bool))));
         setToolBarIconSize(connectToolBar);
@@ -474,7 +549,7 @@ namespace Robomongo
         openSaveToolBar->addAction(_openAction);
         openSaveToolBar->addAction(_saveAction);
         openSaveToolBar->setMovable(false);
-        openSaveToolBar->setVisible(toolbarsSettings["open_save"].toBool());
+        openSaveToolBar->setVisible(true /*toolbarsSettings["open_save"].toBool()*/);
         _toolbarsMenu->addAction(openSaveToolBar->toggleViewAction());
         VERIFY(connect(openSaveToolBar->toggleViewAction(), SIGNAL(triggered(bool)), this, SLOT(onOpenSaveToolbarVisibilityChanged(bool))));
         setToolBarIconSize(openSaveToolBar);
@@ -487,32 +562,110 @@ namespace Robomongo
         _execToolBar->addAction(_orientationAction);
         _execToolBar->setShortcutEnabled(1, true);
         _execToolBar->setMovable(false);
-        _execToolBar->setVisible(toolbarsSettings["exec"].toBool());
+        _execToolBar->setVisible(true /*toolbarsSettings["exec"].toBool()*/);
         setToolBarIconSize(_execToolBar);
         addToolBar(_execToolBar);
+
+        _updateLabel = new QLabel;
+        _updateLabel->setWordWrap(true);
+        _updateLabel->setOpenExternalLinks(true);
+        _updateLabel->setTextFormat(Qt::TextFormat::RichText);
+        _updateLabel->setIndent(_updateLabel->fontMetrics().width("T"));
+
+        _closeButton = new QPushButton;
+        _closeButton->setIcon(QIcon(":/robomongo/icons/close_hover_16x16.png"));
+        _closeButton->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Minimum);
+        _closeButton->setMouseTracking(true);
+        _closeButton->setAttribute(Qt::WA_Hover);
+        _closeButton->installEventFilter(this);
+        VERIFY(connect(_closeButton, SIGNAL(clicked()), this, SLOT(on_closeButton_clicked())));
+
+        auto updateBarLay = new QHBoxLayout;
+        updateBarLay->addWidget(_updateLabel);
+        updateBarLay->addWidget(_closeButton, Qt::AlignRight);
+        updateBarLay->setSpacing(0);
+        updateBarLay->setMargin(0);
+
+        auto updateBarWid = new QWidget;
+        updateBarWid->setLayout(updateBarLay);
+
+        _updateBar = new QToolBar("Updates Toolbar");
+        _updateBar->addWidget(updateBarWid);
+        _updateBar->setStyleSheet("background-color: #b3e0ff; border: none;");  // blue
+        addToolBarBreak();
+        addToolBar(_updateBar);
+        _updateBar->setHidden(true);
+        _updateBar->setMovable(false);
+
         _toolbarsMenu->addAction(_execToolBar->toggleViewAction());
-        VERIFY(connect(_execToolBar->toggleViewAction(), SIGNAL(triggered(bool)), this, SLOT(onExecToolbarVisibilityChanged(bool))));
+        VERIFY(connect(_execToolBar->toggleViewAction(), SIGNAL(triggered(bool)), 
+                       this, SLOT(onExecToolbarVisibilityChanged(bool))));
+
+        /* --- Temporarily disabling export/import feature
+        // Export/Import Toolbar
+        auto expImpToolBar = new QToolBar(tr("Export/Import Toolbar"), this);
+        expImpToolBar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        expImpToolBar->setMovable(false);
+        // Add export action
+        _exportAction = new QAction(this);
+        _exportAction->setData("Export");
+        _exportAction->setIcon(GuiRegistry::instance().exportIcon());
+        _exportAction->setDisabled(true);
+        VERIFY(connect(_exportAction, SIGNAL(triggered()), this, SLOT(openExportDialog())));
+        addToolBar(expImpToolBar);
+        expImpToolBar->addAction(_exportAction);
+        // Add import action
+        _importAction = new QAction(this);
+        _importAction->setData("Import");
+        _importAction->setIcon(GuiRegistry::instance().importIcon());
+        _importAction->setDisabled(true);
+        addToolBar(expImpToolBar);
+        expImpToolBar->addAction(_importAction);
+        */
 
         createTabs();
         createStatusBar();
-        setWindowTitle(PROJECT_NAME_TITLE" "PROJECT_VERSION);
+        setWindowTitle("Robo 3T - " + QString(PROJECT_VERSION_SHORT));
         setWindowIcon(GuiRegistry::instance().mainWindowIcon());
 
-        QTimer::singleShot(0, this, SLOT(manageConnections()));
+        QTimer::singleShot(0, this, SLOT(manageConnections()));       
         updateMenus();
+        _updateMenusAtStart = false;
+
+        AppRegistry::instance().bus()->subscribe(this, ConnectionFailedEvent::Type);
+        AppRegistry::instance().bus()->subscribe(this, ScriptExecutedEvent::Type);
+        AppRegistry::instance().bus()->subscribe(this, ScriptExecutingEvent::Type);
+        AppRegistry::instance().bus()->subscribe(this, QueryWidgetUpdatedEvent::Type);
+        AppRegistry::instance().bus()->subscribe(this, OperationFailedEvent::Type);
+
+        restoreWindowSettings();
+
+        // Catch application windows focus changes
+        VERIFY(connect(qApp, SIGNAL(focusChanged(QWidget*, QWidget*)), this, SLOT(on_focusChanged())));
+
+        _networkAccessManager = new QNetworkAccessManager;
+        VERIFY(connect(_networkAccessManager, SIGNAL(finished(QNetworkReply*)), this, SLOT(on_networkReply(QNetworkReply*))));
+        
+        // First check for updates 30 secs after program start
+        QTimer::singleShot(30000, this, SLOT(checkUpdates()));   // 30000 for 30secs
+
+        // Check for updates every 1 hour
+        auto timer = new QTimer(this);
+        VERIFY(connect(timer, SIGNAL(timeout()), this, SLOT(checkUpdates())));
+        timer->start(3600000);     // 1 hour = (3600000 msec = 60 * 60 * 1000 msec)
     }
 
     void MainWindow::createStylesMenu()
     {
         _viewMenu->addSeparator();
          QMenu *styles = _viewMenu->addMenu("Theme");
-         QStringList supportedStyles = detail::getSupportedStyles();
+         QStringList supportedStyles = AppStyleUtils::getSupportedStyles();
          QActionGroup *styleGroup = new QActionGroup(this);
          VERIFY(connect(styleGroup, SIGNAL(triggered(QAction *)), this, SLOT(changeStyle(QAction *))));
          const QString &currentStyle = AppRegistry::instance().settingsManager()->currentStyle();
          for (QStringList::const_iterator it = supportedStyles.begin(); it != supportedStyles.end(); ++it) {
              const QString &style = *it;
-             QAction *styleAction = new QAction(style,this);
+             QAction *styleAction = new QAction(style, this);
              styleAction->setCheckable(true);
              styleAction->setChecked(style == currentStyle);
              styleGroup->addAction(styleAction);
@@ -524,7 +677,7 @@ namespace Robomongo
     {
         QColor windowColor = palette().window().color();
         QColor buttonBgColor = windowColor.lighter(105);
-        QColor buttonBorderBgColor = windowColor.darker(120);
+        QColor buttonBorderBgColor = windowColor.darker(112);
         QColor buttonPressedColor = windowColor.darker(102);
 
         QToolButton *log = new QToolButton(this);
@@ -536,9 +689,9 @@ namespace Robomongo
             "   background-color: %1;"
             "   border-style: outset;"
             "   border-width: 1px;"
-            "   border-radius: 3px;"
+            "   border-radius: 4px;"
             "   border-color: %2;"
-            "   padding: 1px 20px 1px 20px;"
+            "   padding: 1px 10px 1px 10px;"
             "} \n"
             ""
             "QToolButton:checked, QToolButton:pressed {"
@@ -556,9 +709,67 @@ namespace Robomongo
     void MainWindow::changeStyle(QAction *ac)
     {
         const QString &text = ac->text();
-        detail::applyStyle(text);
+        AppStyleUtils::applyStyle(text);
         AppRegistry::instance().settingsManager()->setCurrentStyle(text);
         AppRegistry::instance().settingsManager()->save();
+    }
+
+    void MainWindow::exit()
+    {
+        _allowExit = true;
+        close();
+    }
+
+    void MainWindow::restoreWindowSettings()
+    {
+        QSettings settings("3T", "Robomongo");
+        // Restore settings if registery key exists, otherwise resize as app started for the first time.
+        if (settings.contains("MainWindow/geometry"))
+        {
+            restoreGeometry(settings.value("MainWindow/geometry").toByteArray());
+        }
+        else
+        {
+            // Resize main window. We are trying to keep it "almost" maximized.
+            QRect screenGeometry = QApplication::desktop()->availableGeometry();
+            int horizontalMargin = static_cast<int>(screenGeometry.width() * 0.1);
+            int verticalMargin = static_cast<int>(screenGeometry.height() * 0.1);
+            int _width = screenGeometry.width() - horizontalMargin;
+            int _height = screenGeometry.height() - verticalMargin;
+            resize(QSize(_width, _height));
+
+            // Center main window
+            int x = (screenGeometry.width() - width()) / 2;
+            int y = (screenGeometry.height() - height()) / 2;
+            move(x, y);
+        }
+    }
+
+    void MainWindow::saveWindowSettings() const
+    {
+        QSettings settings("3T", "Robomongo");
+        settings.setValue("MainWindow/geometry", saveGeometry());
+    }
+
+    void MainWindow::adjustUpdatesBarHeight()
+    {
+        if (!AppRegistry::instance().settingsManager()->checkForUpdates() || !_updateBar->isVisible())
+            return;
+
+        QTextDocument doc;
+        doc.setHtml(_updateLabel->text());
+        int const strWidth = _updateLabel->fontMetrics().width(doc.toPlainText());
+        int const lineHeight = _updateLabel->fontMetrics().height();
+        int const widthForUpdateStr = width() - _closeButton->width();
+
+        if (0 == widthForUpdateStr)
+            return;
+
+#ifdef __APPLE__
+        _updateLabel->setFixedHeight((strWidth / widthForUpdateStr + 1) * lineHeight * 1.3);
+#else
+        _updateLabel->setFixedHeight((strWidth / widthForUpdateStr + 1) * lineHeight);
+#endif
     }
 
     void MainWindow::open()
@@ -567,12 +778,14 @@ namespace Robomongo
         if (wid) {
             wid->openFile();
         }
-        else {
-            SettingsManager::ConnectionSettingsContainerType connections = AppRegistry::instance().settingsManager()->connections();
-            if (connections.size() == 1) {
+        else {  // todo: currently this case not handled properly, since "Open" button is 
+                // disabled when no tabs exist
+            auto connectionsCopy = AppRegistry::instance().settingsManager()->connections();
+            if (connectionsCopy.size() == 1) {
                 ScriptInfo inf = ScriptInfo(QString());
                 if (inf.loadFromFile()) {
-                    _app->openShell(connections.at(0), inf);
+                    // todo: for now do not open new shell
+                    _app->openShell(nullptr, connectionsCopy.at(0), inf);
                 }
             }
         }
@@ -594,23 +807,13 @@ namespace Robomongo
         }
     }
 
-    void MainWindow::keyPressEvent(QKeyEvent *event)
-    {
-        if (event->key() == Qt::Key_F12) {
-           _connectButton->showMenu();
-            return;
-        }
-
-        BaseClass::keyPressEvent(event);
-    }
-
     void MainWindow::updateConnectionsMenu()
     {
         _connectionsMenu->clear();
         int number = 1;
         // Populate list with connections
         SettingsManager::ConnectionSettingsContainerType connections = AppRegistry::instance().settingsManager()->connections();
-        for(SettingsManager::ConnectionSettingsContainerType::const_iterator it = connections.begin(); it!= connections.end(); ++it) {
+        for (SettingsManager::ConnectionSettingsContainerType::const_iterator it = connections.begin(); it != connections.end(); ++it) {
             ConnectionSettings *connection = *it;
             QAction *action = new QAction(QtUtils::toQString(connection->getReadableName()), this);
             action->setData(QVariant::fromValue(connection));
@@ -635,10 +838,33 @@ namespace Robomongo
         _connectionsMenu->addAction(connectAction);
     }
 
+    WelcomeTab* MainWindow::getWelcomeTab()
+    {
+        return _workArea->getWelcomeTab();
+    }
+
+    void MainWindow::showQueryWidgetProgressBar() const
+    {
+        if (QueryWidget *widget = _workArea->currentQueryWidget())
+            widget->showProgress();
+    }
+
+    void MainWindow::hideQueryWidgetProgressBar() const
+    {
+        if (QueryWidget *widget = _workArea->currentQueryWidget())
+            widget->hideProgress();
+    }
+    
     void MainWindow::manageConnections()
     {
-        ConnectionsDialog dialog(AppRegistry::instance().settingsManager(), this);
+    #if defined(Q_OS_WIN)
+        _trayIcon->hide(); // hide the tray icon so the main window can't be hidden behind the connections dialog
+    #endif
+
+        static bool checkForImported = true;
+        ConnectionsDialog dialog(AppRegistry::instance().settingsManager(), checkForImported, this);
         int result = dialog.exec();
+        checkForImported = false;
 
         // save settings and update connection menu
         AppRegistry::instance().settingsManager()->save();
@@ -647,13 +873,28 @@ namespace Robomongo
         if (result == QDialog::Accepted) {
             ConnectionSettings *selected = dialog.selectedConnection();
 
+            selected->sshSettings()->setLogLevel(1);
+            if (QGuiApplication::queryKeyboardModifiers().testFlag(Qt::ShiftModifier)) {
+                // Enable debug level of logging for SSH
+                if (selected->sshSettings()->enabled()) {
+                    selected->sshSettings()->setLogLevel(100);
+                }
+
+                // Show log pannel
+                toggleLogs(true);
+            }
+
             try {
-                _app->openServer(selected, true);
+                _app->openServer(selected, ConnectionPrimary);
             } catch(const std::exception &) {
                 QString message = QString("Cannot connect to MongoDB (%1)").arg(QtUtils::toQString(selected->getFullAddress()));
                 QMessageBox::information(this, "Error", message);
             }
         }
+
+    #if defined(Q_OS_WIN)
+        _trayIcon->show(); // show the tray icon once the connections dialog is gone
+    #endif
 
         // on linux focus is lost - we need to activate main window back
         activateWindow();
@@ -720,6 +961,18 @@ namespace Robomongo
         saveAutoExec(send->isChecked());
     }
 
+    void MainWindow::toggleCheckUpdates()
+    {
+        auto action = qobject_cast<QAction*>(sender());
+        AppRegistry::instance().settingsManager()->setCheckForUpdates(action->isChecked());
+        AppRegistry::instance().settingsManager()->save();
+    }
+
+    void MainWindow::openShellTimeoutDialog()
+    {
+        changeShellTimeoutDialog();
+    }
+
     void MainWindow::toggleLineNumbers()
     {
         QAction *send = qobject_cast<QAction*>(sender());
@@ -773,7 +1026,7 @@ namespace Robomongo
 
     void MainWindow::refreshConnections()
     {
-        QToolTip::showText(QPoint(0,0),
+        QToolTip::showText(QPoint(0, 0),
         QString("Refresh not working yet... : <br/>  <b>Ctrl+D</b> : push Button"));
     }
 
@@ -788,6 +1041,24 @@ namespace Robomongo
         PreferencesDialog dlg(this);
         dlg.exec();
     }
+
+
+    void MainWindow::openWelcomeTab()
+    {
+        _workArea->openWelcomeTab();
+    }
+
+    /* --- Temporarily disabling export/import feature
+    void MainWindow::openExportDialog()
+    {
+        auto selectedItem = dynamic_cast<ExplorerCollectionTreeItem*>(_explorer->getSelectedTreeItem());
+        auto dbName = QString::fromStdString(selectedItem->collection()->database()->name());
+        auto collName = QString::fromStdString(selectedItem->collection()->name());
+
+        auto dialog = new ExportDialog(dbName, collName, this);
+        dialog->show(); // show it mode-less so that user can perform multiple simultaneous exports
+    }
+    */
 
     void MainWindow::setDefaultUuidEncoding()
     {
@@ -868,19 +1139,29 @@ namespace Robomongo
         QVariant data = connectionAction->data();
         ConnectionSettings *ptr = data.value<ConnectionSettings *>();
         try {
-            _app->openServer(ptr, true);
+            _app->openServer(ptr, ConnectionPrimary);
         }
         catch(const std::exception &) {
-            QString message = QString("Cannot connect to MongoDB (%1)").arg(QtUtils::toQString(ptr->getFullAddress()));
+            QString message = QString("Cannot connect to the MongoDB at %1.")
+                .arg(QtUtils::toQString(ptr->getFullAddress()));
             QMessageBox::information(this, "Error", message);
         }
     }
 
     void MainWindow::handle(ConnectionFailedEvent *event)
     {
-        ConnectionSettings *connection = event->server->connectionRecord();
-        QString message = QString("Cannot connect to MongoDB (%1),\nerror: %2").arg(QtUtils::toQString(connection->getFullAddress())).arg(QtUtils::toQString(event->error().errorMessage()));
-        QMessageBox::information(this, "Error", message);
+        // Handle only Primary connections
+        if (event->connectionType != ConnectionPrimary)
+            return;
+
+        // Very temporary solution to prevent multiple connection error messages
+        // from both SshTunnelWorker and MongoWorker
+        static int lastServerHandle = -1;
+        if (event->serverHandle <= lastServerHandle)
+            return;
+
+        lastServerHandle = event->serverHandle;
+        QMessageBox::critical(this, "Error", QtUtils::toQString(event->message));
     }
 
     void MainWindow::handle(ScriptExecutingEvent *)
@@ -895,6 +1176,88 @@ namespace Robomongo
         _executeAction->setDisabled(false);
     }
 
+    void MainWindow::handle(OperationFailedEvent *event)
+    {
+        std::stringstream ss;
+        ss << event->userFriendlyErrorMessage << std::endl << std::endl
+            << "Error:" << std::endl << event->technicalErrorMessage;
+
+        QMessageBox::critical(NULL, "Operation failed", QtUtils::toQString(ss.str()));
+    }
+
+    void MainWindow::keyPressEvent(QKeyEvent *event)
+    {
+        if (event->key() == Qt::Key_F12) {
+            _connectButton->showMenu();
+            return;
+        }
+
+        BaseClass::keyPressEvent(event);
+    }
+
+    void MainWindow::closeEvent(QCloseEvent *event)
+    {
+        AppRegistry::instance().settingsManager()->setProgramExitedNormally(true);
+        AppRegistry::instance().settingsManager()->save();
+        saveWindowSettings();
+    #if defined(Q_OS_WIN)
+        if (AppRegistry::instance().settingsManager()->minimizeToTray() && !_allowExit) {
+            event->ignore();
+            hide(); // hide the window because it can be reopened with the tray icon
+        }
+        else {
+            if (_trayIcon->isVisible())
+                _trayIcon->hide();
+
+            QMainWindow::closeEvent(event);
+        }
+    #else
+        QMainWindow::closeEvent(event);
+    #endif
+    }
+
+    void MainWindow::hideEvent(QHideEvent *event)
+    {
+#if defined(Q_OS_WIN)
+        if (_trayIcon->contextMenu()->actions().size() > 0 && isHidden()) {
+            _trayIcon->contextMenu()->actions().at(0)->setText("Show Robo 3T");
+        }
+#endif
+    }
+    
+    void MainWindow::showEvent(QShowEvent *event)
+    {
+#if defined(Q_OS_WIN)
+        if (_trayIcon->contextMenu()->actions().size() > 0) {
+            _trayIcon->contextMenu()->actions().at(0)->setText("Minimize to Tray");
+        }
+#endif
+    }
+
+    bool MainWindow::eventFilter(QObject *target, QEvent *event)
+    {
+        auto closeUpdatesBarButton = qobject_cast<QPushButton*>(target);
+        if (!closeUpdatesBarButton)
+            return false;
+
+        if (event->type() == QEvent::HoverEnter) {
+            closeUpdatesBarButton->setIcon(QIcon(":/robomongo/icons/close_hover_16x16_original.png"));
+            return true;
+        }
+        else  if (event->type() == QEvent::HoverLeave) {
+            closeUpdatesBarButton->setIcon(QIcon(":/robomongo/icons/close_hover_16x16.png"));
+            return true;
+        }
+
+        return QWidget::eventFilter(target, event);
+    }
+
+    void MainWindow::resizeEvent(QResizeEvent* event)
+    {
+        QMainWindow::resizeEvent(event);
+        adjustUpdatesBarHeight();
+    }
+
     void MainWindow::handle(QueryWidgetUpdatedEvent *event)
     {
         _orientationAction->setEnabled(event->numOfResults() > 1);
@@ -902,19 +1265,22 @@ namespace Robomongo
 
     void MainWindow::createDatabaseExplorer()
     {
-        ExplorerWidget *explorer = new ExplorerWidget(this);
-        AppRegistry::instance().bus()->subscribe(explorer, ConnectingEvent::Type);
-        AppRegistry::instance().bus()->subscribe(explorer, ConnectionFailedEvent::Type);
-        AppRegistry::instance().bus()->subscribe(explorer, ConnectionEstablishedEvent::Type);
+        _explorer = new ExplorerWidget(this);
+        AppRegistry::instance().bus()->subscribe(_explorer, ConnectingEvent::Type);
+        AppRegistry::instance().bus()->subscribe(_explorer, ConnectionFailedEvent::Type);
+        AppRegistry::instance().bus()->subscribe(_explorer, ConnectionEstablishedEvent::Type);
 
         QDockWidget *explorerDock = new QDockWidget(tr("Database Explorer"));
         explorerDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-        explorerDock->setWidget(explorer);
+        explorerDock->setWidget(_explorer);
         explorerDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
 
         QWidget *titleWidget = new QWidget(this);         // this lines simply remove
         explorerDock->setTitleBarWidget(titleWidget);     // title bar widget.
-        explorerDock->setVisible(AppRegistry::instance().settingsManager()->toolbars()["explorer"].toBool());
+        explorerDock->setVisible(true);
+
+        // Prior to v0.9 it was:
+        // explorerDock->setVisible(AppRegistry::instance().settingsManager()->toolbars()["explorer"].toBool());
         
         QAction *actionExp = explorerDock->toggleViewAction();
         // Adjust any parameter you want.  
@@ -929,20 +1295,18 @@ namespace Robomongo
         addDockWidget(Qt::LeftDockWidgetArea, explorerDock);
 
         LogWidget *log = new LogWidget(this);        
-        VERIFY(connect(&Logger::instance(), SIGNAL(printed(const QString&, mongo::LogLevel)), log, SLOT(addMessage(const QString&, mongo::LogLevel))));
+        VERIFY(connect(&Logger::instance(), SIGNAL(printed(const QString&, mongo::logger::LogSeverity)), log, SLOT(addMessage(const QString&, mongo::logger::LogSeverity))));
         _logDock = new QDockWidget(tr("Logs"));
         _logDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea | Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
         _logDock->setWidget(log);
-        _logDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
-        _logDock->setVisible(AppRegistry::instance().settingsManager()->toolbars()["logs"].toBool());
-        
+        _logDock->setFeatures(QDockWidget::DockWidgetClosable);
+        _logDock->setVisible(false);
+
         QAction *action = _logDock->toggleViewAction();
-        // Adjust any parameter you want.  
         action->setText(QString("&Logs"));
         action->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_L));  
         //action->setStatusTip(QString("Press to show/hide Logs panel."));  //commented for now because this message hides Logs button in status bar :)
         action->setChecked(_logDock->isVisible());
-        VERIFY(connect(action, SIGNAL(triggered(bool)), this, SLOT(onLogsVisibilityChanged(bool))));
         // Install action in the menu.
         _viewMenu->addAction(action);
         
@@ -951,8 +1315,20 @@ namespace Robomongo
 
     void MainWindow::updateMenus()
     {
-        int contTab = _workArea->count();
-        bool isEnable = _workArea && contTab > 0;
+        if (!_workArea)
+            return;
+
+        bool isEnable = false;
+        if (_updateMenusAtStart)
+            isEnable = false;
+        else {
+            if (getWelcomeTab() && getWelcomeTab()->isVisible())
+                isEnable = false;
+            else if (_workArea->count() == 0)
+                isEnable = false;
+            else
+                isEnable = true;
+        }
 
         _execToolBar->setEnabled(isEnable);
         _openAction->setEnabled(isEnable);
@@ -965,6 +1341,7 @@ namespace Robomongo
         _workArea = new WorkAreaTabWidget(this);
         AppRegistry::instance().bus()->subscribe(_workArea, OpeningShellEvent::Type);
         VERIFY(connect(_workArea, SIGNAL(currentChanged(int)), this, SLOT(updateMenus())));
+        VERIFY(connect(_workArea, SIGNAL(currentChanged(int)), this, SLOT(on_tabChange())));
 
         QHBoxLayout *hlayout = new QHBoxLayout;
         hlayout->setContentsMargins(0, 3, 0, 0);
@@ -998,10 +1375,113 @@ namespace Robomongo
         AppRegistry::instance().settingsManager()->setToolbarSettings("explorer", isVisible);
         AppRegistry::instance().settingsManager()->save();
     }
-    
-    void MainWindow::onLogsVisibilityChanged(bool isVisible) 
+
+    /* --- Temporarily disabling export/import feature
+    void MainWindow::onExplorerItemSelected(QTreeWidgetItem *selectedItem)
     {
-        AppRegistry::instance().settingsManager()->setToolbarSettings("logs", isVisible);
-        AppRegistry::instance().settingsManager()->save();
+        auto collectionItem = dynamic_cast<ExplorerCollectionTreeItem*>(selectedItem);
+        if (collectionItem) {
+            _exportAction->setEnabled(true);
+        }
+        else {
+            _exportAction->setDisabled(true);
+        }
     }
+    */
+
+    void MainWindow::on_tabChange()
+    {
+        auto activeTab = dynamic_cast<QueryWidget*>(_workArea->currentWidget());
+        if (activeTab) {
+            activeTab->bringDockToFront();
+        }
+    }
+
+    void MainWindow::toggleMinimize()
+    {
+        if (isHidden()) {
+            show();
+        }
+        else {
+            hide();
+        }
+    }
+
+    void MainWindow::trayActivated(QSystemTrayIcon::ActivationReason reason)
+    {
+        if (QSystemTrayIcon::DoubleClick == reason && isHidden()) {
+            show();
+        }
+    }
+
+    void MainWindow::toggleMinimizeToTray()
+    {
+        QAction *send = qobject_cast<QAction*>(sender());
+        saveMinimizeToTraySettings(send->isChecked());
+    }
+
+    void MainWindow::on_focusChanged()
+    {
+        // If focus is on floating output window, make it's parent (which is a QueryWidget tab) as active tab
+        auto const activeDock = dynamic_cast<QueryWidget::CustomDockWidget*>(qApp->activeWindow());
+        if (activeDock) {
+            _workArea->setCurrentWidget(activeDock->getParentQueryWidget());
+        }
+    }
+
+    void MainWindow::on_networkReply(QNetworkReply* reply)
+    {
+        QString str(QUrl::fromPercentEncoding(reply->readAll()));
+
+        if ("NO-UPDATES-ANNOUNCED.\n" == str || reply->error() != QNetworkReply::NoError || str.isEmpty()) {
+            _updateLabel->setText("");
+            _updateBar->setVisible(false);
+            return;
+        }
+
+        str.replace('+', ' ');
+        str.remove("Update,");
+
+        _updateLabel->setText(str);
+        _updateBar->setVisible(true);
+        adjustUpdatesBarHeight();
+    }
+
+    void MainWindow::on_closeButton_clicked()
+    {
+        _updateBar->setVisible(false);
+    }
+
+    void MainWindow::checkUpdates()
+    {
+        auto const& settingsManager = Robomongo::AppRegistry::instance().settingsManager();
+        if (!settingsManager->checkForUpdates())
+            return;
+
+#ifdef _WIN32
+        QString const OS = "win";
+#elif __APPLE__
+        QString const OS = "osx";
+#elif __linux__
+        QString const OS = "linux";
+#else
+        QString const OS = "unknown";
+#endif
+
+        // Build dbVersionsConnected in following format: "3.4.3,2.6.0,..."
+        QString dbVersionsConnected;
+        for (auto const& version : settingsManager->dbVersionsConnected())
+            dbVersionsConnected.append(version + ',');
+        
+        if (dbVersionsConnected.endsWith(','))
+            dbVersionsConnected.chop(1);
+
+        // softwareId=8: Robomongo product ID 
+        QUrl url("http://updates.3tsoftwarelabs.com/check.php?os=" + OS + "&softwareId=8&softwareVersion=" +
+                  QString(PROJECT_VERSION) + "&licenseInfo=FREE&setup=" + settingsManager->anonymousID() + 
+                  "&dbVersionsConnected=" + dbVersionsConnected + "&notify=true#");
+
+        _networkAccessManager->get(QNetworkRequest(url));
+    }
+
 }

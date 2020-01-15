@@ -23,7 +23,7 @@ namespace Robomongo
         /**
          * @brief Creates dialog
          */
-        ConnectionsDialog(SettingsManager *manager, QWidget *parent = 0);
+        ConnectionsDialog(SettingsManager *manager, bool checkForImported, QWidget *parent = 0);
 
         /**
          * @brief ConnectionSettings, that was selected after pressing on
@@ -31,18 +31,30 @@ namespace Robomongo
          */
         ConnectionSettings *selectedConnection() const { return _selectedConnection; }
 
+    public Q_SLOTS:
         /**
          * @brief This function is called when user clicks on "Connect" button.
          */
-        virtual void accept();
+        void accept() override;
+
+        /**
+        * @brief Called when "Cancel" button clicked.
+        */
+        void reject() override;
+
+        /**
+        * @brief Add connection to the list widget
+        */
+        void add(ConnectionSettings *connection);
+        
+    protected:
+        /**
+        * @brief Reimplementing closeEvent in order to do some pre-close actions.
+        */
+        void closeEvent(QCloseEvent *event) override;
 
     private Q_SLOTS:
         void linkActivated(const QString &link);
-
-        /**
-         * @brief Add connection to the list widget
-         */
-        void add(ConnectionSettings *connection);
 
         /**
          * @brief Initiate 'add' action, usually when user clicked on Add button
@@ -72,7 +84,20 @@ namespace Robomongo
          */
         void listWidget_layoutChanged();
 
+        void keyPressEvent(QKeyEvent* event) override;
+
     private:
+
+        /**
+        * @brief Restore window settings from system registry
+        */
+        void restoreWindowSettings();
+
+        /**
+        * @brief Save windows settings into system registry
+        */
+        void saveWindowSettings() const;
+
         /**
          * @brief ConnectionSettings, that was selected after pressing on
          * "Connect" button
@@ -94,6 +119,8 @@ namespace Robomongo
          * ConnectionListWidgetItem*
          */
         ConnectionListItemContainerType _connectionItems;
+
+        bool _checkForImported;
     };    
 
     class ConnectionsTreeWidget : public QTreeWidget

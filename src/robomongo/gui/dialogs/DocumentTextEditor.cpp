@@ -6,8 +6,10 @@
 #include <QMessageBox>
 #include <QDialogButtonBox>
 #include <QDesktopWidget>
+#include <QSettings>
 #include <Qsci/qscilexerjavascript.h>
-#include <mongo/client/dbclient.h>
+
+#include <mongo/client/dbclientinterface.h>
 
 #include "robomongo/gui/editors/JSLexer.h"
 #include "robomongo/gui/editors/FindFrame.h"
@@ -16,7 +18,7 @@
 #include "robomongo/gui/GuiRegistry.h"
 
 #include "robomongo/core/utils/QtUtils.h"
-#include "robomongo/shell/db/json.h"
+#include "robomongo/shell/bson/json.h"
 
 
 namespace Robomongo
@@ -28,7 +30,21 @@ namespace Robomongo
         _info(info),
         _readonly(readonly)
     {
-        setMinimumSize(minimumSize);
+        QRect screenGeometry = QApplication::desktop()->availableGeometry();
+        int horizontalMargin = (int)(screenGeometry.width() * 0.35);
+        int verticalMargin = (int)(screenGeometry.height() * 0.20);
+        QSize size(screenGeometry.width() - horizontalMargin,
+                   screenGeometry.height() - verticalMargin);
+
+        QSettings settings("3T", "Robomongo");
+        if (settings.contains("DocumentTextEditor/size"))
+        {
+            restoreWindowSettings();
+        }
+        else
+        {
+            resize(size);
+        }
 
         setWindowFlags(Qt::Window | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
 
@@ -43,6 +59,9 @@ namespace Robomongo
         _queryText = new FindFrame(this);
         _configureQueryText();
         _queryText->sciScintilla()->setText(json);
+        // clear modification state after setting the content
+        _queryText->sciScintilla()->setModified(false);
+
         VERIFY(connect(_queryText->sciScintilla(), SIGNAL(textChanged()), this, SLOT(onQueryTextChanged())));
 
         QHBoxLayout *hlayout = new QHBoxLayout();
@@ -74,8 +93,11 @@ namespace Robomongo
         layout->addLayout(bottomlayout);
         setLayout(layout);
 
-        if (_readonly)
+        if (_readonly) {
+            validate->hide();
             buttonBox->button(QDialogButtonBox::Save)->hide();
+            _queryText->sciScintilla()->setReadOnly(true);
+        }
     }
 
     QString DocumentTextEditor::jsonText() const
@@ -93,30 +115,57 @@ namespace Robomongo
         if (!validate())
             return;
 
+        saveWindowSettings();
+
         QDialog::accept();
+    }
+
+    void DocumentTextEditor::reject()
+    {
+        if (_queryText->sciScintilla()->isModified()) {
+            int ret = QMessageBox::warning(this, tr("Robo 3T"),
+                               tr("The document has been modified.\n"
+                                  "Do you want to save your changes?"),
+                               QMessageBox::Save | QMessageBox::Discard
+                               | QMessageBox::Cancel,
+                               QMessageBox::Save);
+
+            if (ret == QMessageBox::Save) {
+                this->accept();
+            } else if (ret == QMessageBox::Discard) {
+                QDialog::reject();
+            }
+
+            return;
+        }
+
+        saveWindowSettings();
+
+        QDialog::reject();
     }
 
     bool DocumentTextEditor::validate(bool silentOnSuccess /* = true */)
     {
         QString text = jsonText();
         int len = 0;
-        try {  
+        try {
             std::string textString = QtUtils::toStdString(text);
             const char *json = textString.c_str();
             int jsonLen = textString.length();
             int offset = 0;
             _obj.clear();
-            while(offset!=jsonLen)
-            { 
-                mongo::BSONObj doc = mongo::Robomongo::fromjson(json+offset,&len);
+            while (offset != jsonLen)
+            {
+                mongo::BSONObj doc = mongo::Robomongo::fromjson(json+offset, &len);
                 _obj.push_back(doc);
-                offset+=len;
+                offset += len;
             }
-        } catch (const mongo::ParseMsgAssertionException &ex) {
+        } catch (const mongo::Robomongo::ParseMsgAssertionException &ex) {
+//            v0.9
             QString message = QtUtils::toQString(ex.reason());
             int offset = ex.offset();
 
-            int line=0, pos=0;
+            int line = 0, pos = 0;
             _queryText->sciScintilla()->lineIndexFromPosition(offset, &line, &pos);
             _queryText->sciScintilla()->setCursorPosition(line, pos);
 
@@ -151,6 +200,12 @@ namespace Robomongo
         validate(false);
     }
 
+    void DocumentTextEditor::closeEvent(QCloseEvent *event)
+    {
+        saveWindowSettings();
+        QWidget::closeEvent(event);
+    }
+
     /*
     ** Configure QsciScintilla query widget
     */
@@ -159,7 +214,7 @@ namespace Robomongo
         QsciLexerJavaScript *javaScriptLexer = new JSLexer(this);
         QFont font = GuiRegistry::instance().font();
         javaScriptLexer->setFont(font);
-        _queryText->sciScintilla()->setBraceMatching(QsciScintilla::StrictBraceMatch);
+        _queryText->sciScintilla()->setAppropriateBraceMatching();
         _queryText->sciScintilla()->setFont(font);
         _queryText->sciScintilla()->setPaper(QColor(255, 0, 0, 127));
         _queryText->sciScintilla()->setLexer(javaScriptLexer);
@@ -169,4 +224,17 @@ namespace Robomongo
 
         _queryText->sciScintilla()->setStyleSheet("QFrame { background-color: rgb(73, 76, 78); border: 1px solid #c7c5c4; border-radius: 4px; margin: 0px; padding: 0px;}");
     }
+
+    void DocumentTextEditor::saveWindowSettings() const
+    {
+        QSettings settings("3T", "Robomongo");
+        settings.setValue("DocumentTextEditor/size", size());
+    }
+
+    void DocumentTextEditor::restoreWindowSettings()
+    {
+        QSettings settings("3T", "Robomongo");
+        resize(settings.value("DocumentTextEditor/size").toSize());
+    }
+
 }

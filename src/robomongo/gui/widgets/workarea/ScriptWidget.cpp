@@ -4,7 +4,6 @@
 #include <QKeyEvent>
 #include <QCompleter>
 #include <QStringListModel>
-#include <QMessageBox>
 #include <Qsci/qscilexerjavascript.h>
 #include <Qsci/qsciscintilla.h>
 
@@ -14,6 +13,7 @@
 #include "robomongo/core/utils/QtUtils.h"
 
 #include "robomongo/gui/widgets/workarea/IndicatorLabel.h"
+#include "robomongo/gui/widgets/workarea/QueryWidget.h"
 #include "robomongo/gui/GuiRegistry.h"
 #include "robomongo/gui/editors/JSLexer.h"
 #include "robomongo/gui/editors/FindFrame.h"
@@ -49,21 +49,24 @@ namespace
 
 namespace Robomongo
 {
-    ScriptWidget::ScriptWidget(MongoShell *shell) :
+    ScriptWidget::ScriptWidget(MongoShell *shell, QueryWidget *parent) :
         _shell(shell),
+        _parent(parent),
         _textChanged(false),
         _disableTextAndCursorNotifications(false)
     {
-        setStyleSheet("QFrame {background-color: rgb(255, 255, 255); border: 0px solid #c7c5c4; border-radius: 0px; margin: 0px; padding: 0px;}");
+        setStyleSheet("QFrame {background-color: rgb(255, 255, 255); border: 0px solid #c7c5c4;"
+                      "border-radius: 0px; margin: 0px; padding: 0px;}");
 
         _queryText = new FindFrame(this);
-        _topStatusBar = new TopStatusBar(_shell->server()->connectionRecord()->connectionName(), _shell->server()->connectionRecord()->getFullAddress(), "loading...");
+        _topStatusBar = new TopStatusBar(_shell->server()->connectionRecord()->connectionName(), 
+                                         _shell->server()->connectionRecord()->getFullAddress(), "loading...");
 
         QVBoxLayout *layout = new QVBoxLayout;
         layout->setSpacing(0);
         layout->setContentsMargins(5, 1, 5, 5);
         layout->addWidget(_topStatusBar, 0, Qt::AlignTop);
-        layout->addWidget(_queryText, 1, Qt::AlignTop);
+        layout->addWidget(_queryText);
         setLayout(layout);
 
         // Query text widget
@@ -215,18 +218,36 @@ namespace Robomongo
         scin->setIgnoreTabKey(false);
     }
 
+    void ScriptWidget::disableFixedHeight() const
+    {
+        _queryText->setMinimumSize(0, 0);
+        _queryText->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        _queryText->sciScintilla()->setMinimumSize(0, 0);
+        _queryText->sciScintilla()->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        _queryText->sciScintilla()->setFocus();
+    }
+
     void ScriptWidget::ui_queryLinesCountChanged()
     {
-        int lines = _queryText->sciScintilla()->lines();
-        int height = editorHeight(lines);
+        // Set fixed size only if output widget is docked
+        if (_parent->outputWindowDocked())
+        {
+            int lines = _queryText->sciScintilla()->lines();
+            int editorTotalHeight = editorHeight(lines);
 
-        int maxHeight = editorHeight(18);
-        if (height > maxHeight)
-            height = maxHeight;
-        _queryText->setFixedHeight(height);
-        _queryText->sciScintilla()->setFixedHeight(height);
-        _queryText->setSizePolicy(QSizePolicy::MinimumExpanding,QSizePolicy::MinimumExpanding);
-        _queryText->setMaximumHeight(height+FindFrame::HeightFindPanel);
+            int maxHeight = editorHeight(18);
+            if (editorTotalHeight > maxHeight) {
+                editorTotalHeight = maxHeight;
+            }
+            // Hide & Show solves problem of UI blinking
+            _queryText->hide();
+            _queryText->setFixedHeight(editorTotalHeight);
+            _queryText->sciScintilla()->setFixedHeight(editorTotalHeight);
+            _queryText->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+            _queryText->setMaximumHeight(editorTotalHeight + FindFrame::HeightFindPanel);
+            _queryText->sciScintilla()->setFocus();
+            _queryText->show();
+        }
     }
 
     void ScriptWidget::onTextChanged()
@@ -238,7 +259,7 @@ namespace Robomongo
 
     void ScriptWidget::onCursorPositionChanged(int line, int index)
     {
-        if (!_disableTextAndCursorNotifications&&_textChanged) {
+        if (!_disableTextAndCursorNotifications && _textChanged) {
             showAutocompletion();
             _textChanged = false;
         }
@@ -280,7 +301,7 @@ namespace Robomongo
         int height = editorHeight(1);
         _queryText->sciScintilla()->setMinimumHeight(height);
         _queryText->sciScintilla()->setFixedHeight(height);
-        _queryText->sciScintilla()->setBraceMatching(QsciScintilla::StrictBraceMatch);
+        _queryText->sciScintilla()->setAppropriateBraceMatching();
         _queryText->sciScintilla()->setFont(GuiRegistry::instance().font());
         _queryText->sciScintilla()->setPaper(QColor(255, 0, 0, 127));
         _queryText->sciScintilla()->setLexer(javaScriptLexer);
@@ -288,7 +309,7 @@ namespace Robomongo
         _queryText->sciScintilla()->setStyleSheet("QFrame { background-color: rgb(73, 76, 78); border: 1px solid #c7c5c4; border-radius: 4px; margin: 0px; padding: 0px;}");
         VERIFY(connect(_queryText->sciScintilla(), SIGNAL(linesChanged()), SLOT(ui_queryLinesCountChanged())));
         VERIFY(connect(_queryText->sciScintilla(), SIGNAL(textChanged()), SLOT(onTextChanged())));
-        VERIFY(connect(_queryText->sciScintilla(), SIGNAL(cursorPositionChanged(int,int)), SLOT(onCursorPositionChanged(int,int))));
+        VERIFY(connect(_queryText->sciScintilla(), SIGNAL(cursorPositionChanged(int, int)), SLOT(onCursorPositionChanged(int, int))));
     }
 
     /**
@@ -372,13 +393,16 @@ namespace Robomongo
         setContentsMargins(0, 0, 0, 0);
         _textColor = palette().text().color().lighter(200);
 
-        _currentConnectionLabel = new Indicator(GuiRegistry::instance().connectIcon(), QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(connectionName.c_str()));
+        _currentConnectionLabel = new Indicator(GuiRegistry::instance().connectIcon(), 
+            QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(connectionName.c_str()));
         _currentConnectionLabel->setDisabled(true);
         
-        _currentServerLabel = new Indicator(GuiRegistry::instance().serverIcon(), QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(serverName.c_str()));
+        _currentServerLabel = new Indicator(GuiRegistry::instance().serverIcon(), 
+            QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(serverName.c_str()));
         _currentServerLabel->setDisabled(true);
 
-        _currentDatabaseLabel = new Indicator(GuiRegistry::instance().databaseIcon(), QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(dbName.c_str()));
+        _currentDatabaseLabel = new Indicator(GuiRegistry::instance().databaseIcon(), 
+            QString("<font color='%1'>%2</font>").arg(_textColor.name()).arg(dbName.c_str()));
         _currentDatabaseLabel->setDisabled(true);
         
         QHBoxLayout *topLayout = new QHBoxLayout;

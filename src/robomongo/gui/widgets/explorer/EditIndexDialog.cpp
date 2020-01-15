@@ -21,8 +21,8 @@
 #include "robomongo/gui/editors/PlainJavaScriptEditor.h"
 #include "robomongo/gui/GuiRegistry.h"
 #include "robomongo/core/domain/MongoCollection.h"
-#include "robomongo/shell/db/json.h"
 #include "robomongo/core/utils/QtUtils.h"
+#include <robomongo/shell/bson/json.h>
 
 namespace
 {
@@ -34,8 +34,7 @@ namespace
                 mongo::Robomongo::fromjson(text.toUtf8());
                 result = true;
             }
-            catch (const mongo::ParseMsgAssertionException &) {
-
+            catch (const std::exception &) {
             }
         }
         return result;
@@ -63,7 +62,7 @@ namespace
         Robomongo::FindFrame *findFrame = new Robomongo::FindFrame(parent);
         findFrame->sciScintilla()->setLexer(javaScriptLexer);
         findFrame->sciScintilla()->setTabWidth(4);
-        findFrame->sciScintilla()->setBraceMatching(QsciScintilla::StrictBraceMatch);
+        findFrame->sciScintilla()->setAppropriateBraceMatching();
         findFrame->sciScintilla()->setFont(textFont);
         findFrame->sciScintilla()->setStyleSheet("QFrame {background-color: rgb(73, 76, 78); border: 1px solid #c7c5c4; border-radius: 4px; margin: 0px; padding: 0px;}");
         findFrame->sciScintilla()->setText(text);
@@ -75,11 +74,11 @@ namespace
 namespace Robomongo
 {
     EditIndexDialog::EditIndexDialog(const EnsureIndexInfo &info, const QString &databaseName, const QString &serverAdress, QWidget *parent)
-        :BaseClass(parent),_info(info)
+        :BaseClass(parent), _info(info)
     {        
         setWindowTitle("Index Properties");
         Indicator *serverIndicator = new Indicator(GuiRegistry::instance().serverIcon(), serverAdress);
-        Indicator *collectionIndicator = new Indicator(GuiRegistry::instance().collectionIcon(),QtUtils::toQString(_info._collection.name()));
+        Indicator *collectionIndicator = new Indicator(GuiRegistry::instance().collectionIcon(), QtUtils::toQString(_info._collection.name()));
         Indicator *databaseIndicator = new Indicator(GuiRegistry::instance().databaseIcon(), databaseName);
 
         QHBoxLayout *hlayout = new QHBoxLayout;
@@ -157,7 +156,7 @@ namespace Robomongo
         layout->addWidget(dropDupsHelpLabel,            7, 0, 1, 2);
         layout->setAlignment(Qt::AlignTop);
         basicTab->setLayout(layout);
-        VERIFY(connect(_uniqueCheckBox,SIGNAL(stateChanged(int)),this,SLOT(uniqueStateChanged(int))));
+        VERIFY(connect(_uniqueCheckBox, SIGNAL(stateChanged(int)), this, SLOT(uniqueStateChanged(int))));
         return basicTab;
     }
 
@@ -204,7 +203,7 @@ namespace Robomongo
             _expireAfterLineEdit->setText(QString("%1").arg(_info._ttl));
         }
         expireStateChanged(expireCheckBox->checkState());
-        VERIFY(connect(expireCheckBox,SIGNAL(stateChanged(int)),this,SLOT(expireStateChanged(int))));
+        VERIFY(connect(expireCheckBox, SIGNAL(stateChanged(int)), this, SLOT(expireStateChanged(int))));
 
         QLabel *sparseHelpLabel = createHelpLabel(
             "If set, the index only references documents with the specified field. "

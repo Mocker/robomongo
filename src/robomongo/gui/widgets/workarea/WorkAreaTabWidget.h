@@ -6,6 +6,8 @@ namespace Robomongo
 {
     class QueryWidget;
     class OpeningShellEvent;
+    class WelcomeTab;
+
     /**
      * @brief WorkArea tab widget. Each tab represents MongoDB shell.
      */
@@ -18,7 +20,7 @@ namespace Robomongo
          * @brief Creates WorkAreaTabWidget.
          * @param workAreaWidget: WorkAreaWidget this tab belongs to.
          */
-        explicit WorkAreaTabWidget(QWidget *parent=0);
+        explicit WorkAreaTabWidget(QWidget *parent = 0);
 
         void closeTab(int index);
         void nextTab();
@@ -26,13 +28,8 @@ namespace Robomongo
 
         QueryWidget *currentQueryWidget();
         QueryWidget *queryWidget(int index);
-
-    protected:
-        /**
-         * @brief Overrides QTabWidget::keyPressEvent() in order to intercept
-         * tab close key shortcuts (Ctrl+F4 and Ctrl+W)
-         */
-        virtual void keyPressEvent(QKeyEvent *event);
+        WelcomeTab *getWelcomeTab();
+        void openWelcomeTab();
 
     public Q_SLOTS:
         void handle(OpeningShellEvent *event);
@@ -46,5 +43,16 @@ namespace Robomongo
 
         void tabTextChange(const QString &text);
         void tooltipTextChange(const QString &text);
+
+    protected:
+        /**
+        * @brief Overrides QTabWidget::keyPressEvent() in order to intercept
+        * tab close key shortcuts (Ctrl+F4 and Ctrl+W)
+        */
+        virtual void keyPressEvent(QKeyEvent *event) override;
+        void resizeEvent(QResizeEvent* event) override;
+
+    private:
+        WelcomeTab* _welcomeTab;
     };
 }

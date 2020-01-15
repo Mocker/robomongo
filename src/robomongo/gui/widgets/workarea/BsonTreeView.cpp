@@ -5,15 +5,16 @@
 #include <QMenu>
 #include <QKeyEvent>
 
-#include "robomongo/gui/widgets/workarea/BsonTreeItem.h"
-
-#include "robomongo/gui/GuiRegistry.h"
 #include "robomongo/core/utils/QtUtils.h"
+#include "robomongo/gui/GuiRegistry.h"
+#include "robomongo/gui/widgets/workarea/BsonTreeItem.h"
+#include "robomongo/gui/widgets/workarea/OutputWidget.h"
 
 namespace Robomongo
 {
-    BsonTreeView::BsonTreeView(MongoShell *shell, const MongoQueryInfo &queryInfo, QWidget *parent) 
-        : BaseClass(parent),_notifier(this,shell,queryInfo)
+    BsonTreeView::BsonTreeView(MongoShell *shell, const MongoQueryInfo &queryInfo, QWidget *parent)
+        : BaseClass(parent), _notifier(this, shell, queryInfo), 
+          _outputItemContentWidget(dynamic_cast<const OutputItemContentWidget*>(parent))
     {
 #if defined(Q_OS_MAC)
         setAttribute(Qt::WA_MacShowFocusRect, false);
@@ -25,9 +26,11 @@ namespace Robomongo
         VERIFY(connect(this, SIGNAL(customContextMenuRequested(const QPoint&)), this, SLOT(showContextMenu(const QPoint&))));
 
         _expandRecursive = new QAction("Expand Recursively", this);
+        _expandRecursive->setShortcut(QKeySequence(Qt::ALT + Qt::Key_Right));
         VERIFY(connect(_expandRecursive, SIGNAL(triggered()), SLOT(onExpandRecursive())));
         
         _collapseRecursive = new QAction(tr("Collapse Recursively"), this);
+        _collapseRecursive->setShortcut(QKeySequence(Qt::ALT + Qt::Key_Left));
         VERIFY(connect(_collapseRecursive, SIGNAL(triggered()), SLOT(onCollapseRecursive())));
 
         setStyleSheet("QTreeView { border-left: 1px solid #c7c5c4; border-top: 1px solid #c7c5c4; }");
@@ -38,6 +41,9 @@ namespace Robomongo
 
     void BsonTreeView::showContextMenu(const QPoint &point)
     {        
+        if (_outputItemContentWidget->outputWidget()->progressBarActive())
+            return;
+
         QPoint menuPoint = mapToGlobal(point);
         menuPoint.setY(menuPoint.y() + header()->height());
 
@@ -68,7 +74,7 @@ namespace Robomongo
                 }
             }
 
-            _notifier.initMenu(&menu,documentItem);
+            _notifier.initMenu(&menu, documentItem);
             menu.exec(menuPoint);
         }
     }
@@ -81,9 +87,25 @@ namespace Robomongo
 
     void BsonTreeView::keyPressEvent(QKeyEvent *event)
     {
-        if (event->key() == Qt::Key_Delete) {
-            _notifier.onDeleteDocuments();
+        switch (event->key()) {
+            case Qt::Key_Delete:
+                _notifier.handleDeleteCommand();
+                break;
+            case Qt::Key_Backspace:
+                // Cmd/Ctrl + Backspace
+                if (event->modifiers() & Qt::ControlModifier)
+                    _notifier.handleDeleteCommand();
+                break;
+            case Qt::Key_Right:
+                if (event->modifiers() & Qt::AltModifier)
+                    this->onExpandRecursive();
+                break;
+            case Qt::Key_Left:
+                if (event->modifiers() & Qt::AltModifier)
+                    this->onCollapseRecursive();
+                break;
         }
+
         return BaseClass::keyPressEvent(event);
     }
 
@@ -119,7 +141,7 @@ namespace Robomongo
     {
         QModelIndexList indexes = selectedIndexes();
         if (detail::isMultiSelection(indexes)) {
-            for (int i=0; i<indexes.count(); ++i) 
+            for (int i = 0; i<indexes.count(); ++i)
                 expandNode(indexes[i]);
         } else {
             expandNode(selectedIndex());
@@ -130,7 +152,7 @@ namespace Robomongo
     {
         QModelIndexList indexes = selectedIndexes();
         if (detail::isMultiSelection(indexes)) {
-            for (int i=0; i<indexes.count(); ++i) 
+            for (int i = 0; i<indexes.count(); ++i)
                 collapseNode(indexes[i]);
         } else {
             collapseNode(selectedIndex());

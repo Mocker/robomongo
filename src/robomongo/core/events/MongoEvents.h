@@ -10,8 +10,10 @@
 #include "robomongo/core/domain/MongoUser.h"
 #include "robomongo/core/domain/MongoFunction.h"
 #include "robomongo/core/events/MongoEventsInfo.h"
+#include "robomongo/core/domain/MongoAggregateInfo.h"
 #include "robomongo/core/Event.h"
 #include "robomongo/core/Enums.h"
+#include "robomongo/core/mongodb/ReplicaSet.h"
 
 namespace Robomongo
 {
@@ -19,44 +21,125 @@ namespace Robomongo
     class MongoShell;
     class MongoDatabase;
     class MongoWorker;
+    class ConnectionSettings;
+    class SshTunnelWorker;
 
     /**
      * @brief EstablishConnection
      */
 
-    class EstablishConnectionRequest : public Event
+    struct EstablishConnectionRequest : public Event
     {
         R_EVENT
 
-        EstablishConnectionRequest(QObject *sender, const QString &databaseName,
-                                   const QString &userName, const QString &userPassword) :
+            EstablishConnectionRequest(QObject *sender, ConnectionType connectionType, std::string const& uuid) :
             Event(sender),
-            databaseName(databaseName),
-            userName(userName),
-            userPassword(userPassword) {}
+            connectionType(connectionType),
+            uuid(uuid) {}
 
-        QString databaseName;
-        QString userName;
-        QString userPassword;
+        ConnectionType const connectionType;
+        std::string const uuid;
     };
 
-    class EstablishConnectionResponse : public Event
+    struct EstablishConnectionResponse : public Event
     {
         R_EVENT
 
-        EstablishConnectionResponse(QObject *sender, const ConnectionInfo &info) :
+        enum ErrorReason {
+            NoError             = 0,
+            MongoConnection     = 1,
+            MongoAuth           = 2,
+            MongoSslConnection  = 3
+        };
+
+        EstablishConnectionResponse(QObject *sender, const ConnectionInfo &info, ConnectionType connectionType, 
+                                    const ReplicaSet& replicaSet) :
             Event(sender),
-            _info(info) {}
+            info(info),
+            connectionType(connectionType),
+            replicaSet(replicaSet)
+            {}
 
-        EstablishConnectionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error),_info() {}
+        EstablishConnectionResponse(QObject *sender, const EventError &error, ConnectionType connectionType, 
+                                    ConnectionInfo const& info, const ReplicaSet& replicaSet, ErrorReason errorReason) :
+            Event(sender, error),
+            info(info),
+            connectionType(connectionType),
+            errorReason(errorReason),
+            replicaSet(replicaSet)
+        {}
 
-        const ConnectionInfo &info() const{
-            return _info;
-        }
-        const ConnectionInfo _info;
+        ConnectionInfo const info;
+        ConnectionType const connectionType;
+        ErrorReason const errorReason = NoError;
+        ReplicaSet const replicaSet;
     };
 
+    struct ReplicaSetRefreshed : public Event
+    {
+        R_EVENT
+
+        ReplicaSetRefreshed(QObject *sender) :
+            Event(sender) {}
+
+        ReplicaSetRefreshed(QObject *sender, const EventError &error, ReplicaSet const& replicaSet) :
+            Event(sender, error), replicaSet(replicaSet) {}
+
+        ReplicaSet const replicaSet;
+    };
+
+    struct RefreshReplicaSetFolderRequest : public Event
+    {
+        R_EVENT
+
+        RefreshReplicaSetFolderRequest(QObject *sender, bool expanded) :
+            Event(sender), expanded(expanded) {}
+
+        bool const expanded = false;
+    };
+
+    struct RefreshReplicaSetFolderResponse : public Event
+    {
+        R_EVENT
+
+        // Primary is reachable
+        RefreshReplicaSetFolderResponse(QObject *sender, ReplicaSet const& replicaSet, bool expanded) :
+            Event(sender), replicaSet(replicaSet), expanded(expanded) {}
+        
+        // Primary is unreachable, secondary(ies) might be reachable
+        RefreshReplicaSetFolderResponse(QObject *sender, ReplicaSet const&  replicaSet, bool expanded,
+                                        const EventError &error) :
+            Event(sender, error), replicaSet(replicaSet), expanded(expanded) {}
+
+        ReplicaSet const replicaSet;
+        bool const expanded = false;
+    };
+
+    struct ReplicaSetFolderLoading : public Event
+    {
+        R_EVENT
+
+            ReplicaSetFolderLoading(QObject *sender) :
+            Event(sender) {}
+    };
+
+    struct ReplicaSetFolderRefreshed : public Event
+    {
+        R_EVENT
+
+        ReplicaSetFolderRefreshed(QObject *sender, bool expanded) :
+            Event(sender), expanded(expanded) {}
+
+        ReplicaSetFolderRefreshed(QObject *sender, const EventError &error, bool expanded) :
+            Event(sender, error), expanded(expanded) {}
+
+        ReplicaSetFolderRefreshed(QObject *sender, const EventError &error, ReplicaSet const& replicaSet,
+                                  bool expanded) :
+            Event(sender, error), replicaSet(replicaSet), expanded(expanded) {}
+
+        ReplicaSet const replicaSet;
+        bool const expanded = false;
+    };
 
     /**
      * @brief LoadDatabaseNames
@@ -115,7 +198,7 @@ namespace Robomongo
             _databaseName(databaseName),
             _collectionInfos(collectionInfos) { }
 
-        LoadCollectionNamesResponse(QObject *sender,const EventError &error) :
+        LoadCollectionNamesResponse(QObject *sender, const EventError &error) :
             Event(sender, error) {}
 
         std::string databaseName() const { return _databaseName; }
@@ -131,7 +214,7 @@ namespace Robomongo
         R_EVENT
     public:
         LoadCollectionIndexesRequest(QObject *sender, const MongoCollectionInfo &collection) :
-        Event(sender),_collection(collection) {}
+        Event(sender), _collection(collection) {}
         MongoCollectionInfo collection() const { return _collection; }
     private:
         const MongoCollectionInfo _collection;
@@ -141,7 +224,11 @@ namespace Robomongo
     {
         R_EVENT
     public:
-        LoadCollectionIndexesResponse(QObject *sender, const std::vector<EnsureIndexInfo> &indexes) :Event(sender), _indexes(indexes) {}
+        LoadCollectionIndexesResponse(QObject *sender, const std::vector<EnsureIndexInfo> &indexes) :
+            Event(sender), _indexes(indexes) {}
+
+        LoadCollectionIndexesResponse(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
         std::vector<EnsureIndexInfo> indexes() const { return _indexes; }
     private:
         std::vector<EnsureIndexInfo> _indexes;
@@ -150,7 +237,7 @@ namespace Robomongo
     class EnsureIndexRequest : public Event
     {
         R_EVENT
-        EnsureIndexRequest(QObject *sender,const EnsureIndexInfo &oldInfo,const EnsureIndexInfo &newInfo) : Robomongo::Event(sender),oldInfo_(oldInfo),newInfo_(newInfo) {}
+        EnsureIndexRequest(QObject *sender, const EnsureIndexInfo &oldInfo, const EnsureIndexInfo &newInfo) : Robomongo::Event(sender), oldInfo_(oldInfo), newInfo_(newInfo) {}
         const EnsureIndexInfo &oldInfo() const
         {
             return oldInfo_;
@@ -174,7 +261,7 @@ namespace Robomongo
             _name(name) {}
 
         MongoCollectionInfo collection() const { return _collection; }
-        std::string name() const {return _name;}
+        std::string name() const { return _name; }
     private:
         const MongoCollectionInfo _collection;
         std::string _name;
@@ -184,12 +271,16 @@ namespace Robomongo
     {
         R_EVENT
     public:
-        DeleteCollectionIndexResponse(QObject *sender, const MongoCollectionInfo &collection,const std::string &index) :
-        Event(sender),_collection(collection),_index(index) {}
+        DeleteCollectionIndexResponse(QObject *sender, const MongoCollectionInfo &collection, const std::string &index) :
+            Event(sender), _collection(collection), _index(index) {}
+
+        DeleteCollectionIndexResponse(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
+
         MongoCollectionInfo collection() const { return _collection; }
-        std::string index() const {return _index;}
+        std::string index() const { return _index; }
     private:
-        const MongoCollectionInfo _collection;
+        MongoCollectionInfo _collection;
         std::string _index;
     };
 
@@ -197,11 +288,11 @@ namespace Robomongo
     {
         R_EVENT
     public:
-        EditIndexRequest(QObject *sender, const MongoCollectionInfo &collection,const std::string &oldIndex,const std::string &newIndex) :
-            Event(sender),_collection(collection),_oldIndex(oldIndex),_newIndex(newIndex) {}
+        EditIndexRequest(QObject *sender, const MongoCollectionInfo &collection, const std::string &oldIndex, const std::string &newIndex) :
+            Event(sender), _collection(collection), _oldIndex(oldIndex), _newIndex(newIndex) {}
         MongoCollectionInfo collection() const { return _collection; }
-        std::string oldIndex() const {return _oldIndex;}
-        std::string newIndex() const {return _newIndex;}
+        std::string oldIndex() const { return _oldIndex; }
+        std::string newIndex() const { return _newIndex; }
     private:
         const MongoCollectionInfo _collection;
         std::string _oldIndex;
@@ -238,7 +329,7 @@ namespace Robomongo
             _databaseName(databaseName),
             _users(users) { }
 
-        LoadUsersResponse(QObject *sender,const EventError &error) :
+        LoadUsersResponse(QObject *sender, const EventError &error) :
             Event(sender, error) {}
 
         std::string databaseName() const { return _databaseName; }
@@ -280,7 +371,7 @@ namespace Robomongo
             _databaseName(databaseName),
             _functions(functions) { }
 
-        LoadFunctionsResponse(QObject *sender,const EventError &error) :
+        LoadFunctionsResponse(QObject *sender, const EventError &error) :
             Event(sender, error) {}
 
         std::string databaseName() const { return _databaseName; }
@@ -324,7 +415,7 @@ namespace Robomongo
         InsertDocumentResponse(QObject *sender) :
             Event(sender) {}
 
-        InsertDocumentResponse(QObject *sender, const EventError &error) :
+        InsertDocumentResponse(QObject *sender, EventError const& error) :
             Event(sender, error) {}
     };
 
@@ -332,37 +423,46 @@ namespace Robomongo
      * @brief Remove Document
      */
 
+    enum class RemoveDocumentCount { ONE, MULTI, ALL };
+
     class RemoveDocumentRequest : public Event
     {
         R_EVENT
 
     public:
-        RemoveDocumentRequest(QObject *sender, mongo::Query query, const MongoNamespace &ns, bool justOne = true) :
+        RemoveDocumentRequest(QObject *sender, mongo::Query query, const MongoNamespace &ns, 
+                              RemoveDocumentCount removeCount, int index) :
             Event(sender),
             _query(query),
             _ns(ns),
-            _justOne(justOne) {}
+            _removeCount(removeCount),
+            _index(index) {}
 
         mongo::Query query() const { return _query; }
         MongoNamespace ns() const { return _ns; }
-        bool justOne() const { return _justOne; }
+        RemoveDocumentCount removeCount() const { return _removeCount; }
+        int index() const { return _index; }
 
     private:
-        mongo::Query _query;
-        const MongoNamespace _ns;
-        bool _justOne;
+        mongo::Query const _query;
+        MongoNamespace const _ns;
+        RemoveDocumentCount const _removeCount;
+        // if this is a multi remove, this is the index of current document deleted. 0 for first document.
+        int const _index;     
     };
 
-    class RemoveDocumentResponse : public Event
+    struct RemoveDocumentResponse : public Event
     {
         R_EVENT
 
-    public:
-        RemoveDocumentResponse(QObject *sender) :
-            Event(sender) {}
+        RemoveDocumentResponse(QObject *sender, RemoveDocumentCount removeCount, int index) :
+            Event(sender), removeCount(removeCount), index(index) {}
 
-        RemoveDocumentResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        RemoveDocumentResponse(QObject *sender, const EventError &error, RemoveDocumentCount removeCount, int index) :
+            Event(sender, error), removeCount(removeCount), index(index) {}
+
+        RemoveDocumentCount const removeCount;
+        int const index;
     };
 
     /**
@@ -381,52 +481,49 @@ namespace Robomongo
         std::string database() const { return _database; }
 
     private:
-        std::string _database;
+        std::string const _database;
     };
 
-    class CreateDatabaseResponse : public Event
+    struct CreateDatabaseResponse : public Event
     {
         R_EVENT
 
-    public:
-        CreateDatabaseResponse(QObject *sender) :
-            Event(sender) {}
+        CreateDatabaseResponse(QObject *sender, const std::string &database) :
+            Event(sender), database(database) {}
 
-        CreateDatabaseResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        CreateDatabaseResponse(QObject *sender, const std::string &database, const EventError &error) :
+            Event(sender, error), database(database) {}
+
+        std::string const database;
     };
-
 
 
     /**
      * @brief Drop Database
      */
 
-    class DropDatabaseRequest : public Event
+    struct DropDatabaseRequest : public Event
     {
         R_EVENT
 
-    public:
         DropDatabaseRequest(QObject *sender, const std::string &database) :
-            Event(sender),
-            _database(database) {}
+            Event(sender), database(database) {}
 
-        std::string database() const { return _database; }
-
-    private:
-        std::string _database;
+        std::string const database;
     };
 
-    class DropDatabaseResponse : public Event
+    struct DropDatabaseResponse : public Event
     {
         R_EVENT
 
     public:
-        DropDatabaseResponse(QObject *sender) :
-            Event(sender) {}
+        DropDatabaseResponse(QObject *sender, const std::string &database) :
+            Event(sender), database(database) {}
 
-        DropDatabaseResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        DropDatabaseResponse(QObject *sender, const std::string &database, const EventError &error) :
+            Event(sender, error), database(database) {}
+
+        std::string const database;
     };
 
     /**
@@ -438,26 +535,40 @@ namespace Robomongo
         R_EVENT
 
     public:
-        CreateCollectionRequest(QObject *sender, const MongoNamespace &ns) :
-            Event(sender),
-            _ns(ns) {}
+        CreateCollectionRequest(QObject *sender, const MongoNamespace &ns, 
+                                                 const mongo::BSONObj& extraOptions,
+                                                 long long size = 0,
+                                                 bool capped = false,
+                                                 int maxDocNum = 0
+                                                 ) :
+            Event(sender), _ns(ns), _extraOptions(extraOptions),
+            _size(size), _capped(capped), _maxDocNum(maxDocNum) {}
 
         MongoNamespace ns() const { return _ns; }
+        long long getSize() const { return _size; }
+        bool getCapped() const { return _capped; }
+        int getMaxDocNum() const { return _maxDocNum; }
+        const mongo::BSONObj getExtraOptions() const { return _extraOptions; }
 
     private:
-        const MongoNamespace _ns;
+        MongoNamespace const _ns;
+        long long const _size;
+        bool const _capped;
+        int const _maxDocNum;
+        mongo::BSONObj const _extraOptions;
     };
 
-    class CreateCollectionResponse : public Event
+    struct CreateCollectionResponse : public Event
     {
         R_EVENT
 
-    public:
-        CreateCollectionResponse(QObject *sender) :
-            Event(sender) {}
+        CreateCollectionResponse(QObject *sender, std::string const& collection) :
+        Event(sender), collection(collection) {}
 
-        CreateCollectionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        CreateCollectionResponse(QObject *sender, std::string const& collection, const EventError &error) :
+            Event(sender, error), collection(collection) {}
+
+        std::string const collection;
     };
 
 
@@ -481,16 +592,18 @@ namespace Robomongo
         MongoNamespace _ns;
     };
 
-    class DropCollectionResponse : public Event
+    struct DropCollectionResponse : public Event
     {
         R_EVENT
 
     public:
-        DropCollectionResponse(QObject *sender) :
-            Event(sender) {}
+        DropCollectionResponse(QObject *sender, std::string const& collection) :
+            Event(sender), collection(collection) {}
 
-        DropCollectionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        DropCollectionResponse(QObject *sender, std::string const& collection, const EventError &error) :
+            Event(sender, error), collection(collection) {}
+
+        std::string const collection;
     };
 
     /**
@@ -511,20 +624,23 @@ namespace Robomongo
         std::string newCollection() const { return _newCollection; }
 
     private:
-        MongoNamespace _ns;
-        std::string _newCollection;
+        MongoNamespace const _ns;
+        std::string const _newCollection;
     };
 
-    class RenameCollectionResponse : public Event
+    struct RenameCollectionResponse : public Event
     {
         R_EVENT
 
-    public:
-        RenameCollectionResponse(QObject *sender) :
-            Event(sender) {}
+            RenameCollectionResponse(QObject *sender, std::string const& oldCollection, 
+                                     std::string const& newCollection) :
+            Event(sender), oldCollection(oldCollection), newCollection(newCollection) {}
 
         RenameCollectionResponse(QObject *sender, const EventError &error) :
             Event(sender, error) {}
+
+        std::string const oldCollection;
+        std::string const newCollection;
     };
 
     /**
@@ -545,20 +661,24 @@ namespace Robomongo
         std::string newCollection() const { return _newCollection; }
 
     private:
-        MongoNamespace _ns;
-        std::string _newCollection;
+        MongoNamespace const _ns;
+        std::string const _newCollection;
     };
 
-    class DuplicateCollectionResponse : public Event
+    struct DuplicateCollectionResponse : public Event
     {
         R_EVENT
 
     public:
-        DuplicateCollectionResponse(QObject *sender) :
-            Event(sender) {}
+        DuplicateCollectionResponse(QObject *sender, std::string const& sourceCollection,
+                                    std::string const& duplicateCollection) :
+            Event(sender), sourceCollection(sourceCollection), duplicateCollection(duplicateCollection) {}
 
-        DuplicateCollectionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        DuplicateCollectionResponse(QObject *sender, std::string const& sourceCollection, const EventError &error) :
+            Event(sender, error), sourceCollection(sourceCollection) {}
+
+        std::string const sourceCollection;
+        std::string const duplicateCollection;
     };
 
      /**
@@ -578,7 +698,7 @@ namespace Robomongo
             _to(databaseTo, collection) {}
 
         MongoWorker *worker() const { return _worker; }
-        MongoNamespace from() const { return _from;}
+        MongoNamespace from() const { return _from; }
         MongoNamespace to() const { return _to; }
     private:
         MongoWorker *_worker;
@@ -607,32 +727,30 @@ namespace Robomongo
         R_EVENT
 
     public:
-        CreateUserRequest(QObject *sender, const std::string &database, const MongoUser &user, bool overwrite = false) :
+        CreateUserRequest(QObject *sender, const std::string &database, const MongoUser &user) :
             Event(sender),
             _database(database),
-            _user(user),
-            _overwrite(overwrite) {}
+            _user(user) {}
 
         std::string database() const { return _database; }
         MongoUser user() const { return _user; }
-        bool overwrite() const { return _overwrite; }
 
     private:
         std::string _database;
         MongoUser _user;
-        bool _overwrite;
     };
 
-    class CreateUserResponse : public Event
+    struct CreateUserResponse : public Event
     {
         R_EVENT
 
-    public:
-        CreateUserResponse(QObject *sender) :
-            Event(sender) {}
+        CreateUserResponse(QObject *sender, std::string const& userName) :
+            Event(sender), userName(userName) {}
 
-        CreateUserResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        CreateUserResponse(QObject *sender, std::string const& userName, const EventError &error) :
+            Event(sender, error), userName(userName) {}
+
+        std::string const userName;
     };
 
 
@@ -645,29 +763,28 @@ namespace Robomongo
         R_EVENT
 
     public:
-        DropUserRequest(QObject *sender, const std::string &database, const mongo::OID &id) :
-            Event(sender),
-            _database(database),
-            _id(id) {}
+        DropUserRequest(QObject *sender, const std::string &database, std::string const& username) :
+            Event(sender), _database(database), _username(username) {}
 
         std::string database() const { return _database; }
-        mongo::OID id() const { return _id; }
+        std::string username() const { return _username; }
 
     private:
         std::string _database;
-        mongo::OID _id;
+        std::string const _username;
     };
 
-    class DropUserResponse : public Event
+    struct DropUserResponse : public Event
     {
         R_EVENT
 
-    public:
-        DropUserResponse(QObject *sender) :
-            Event(sender) {}
+        DropUserResponse(QObject *sender, std::string const& username) :
+            Event(sender), username(username) {}
 
-        DropUserResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        DropUserResponse(QObject *sender, std::string const& username, const EventError &error) :
+            Event(sender, error), username(username) {}
+
+        std::string const username;
     };
 
 
@@ -680,38 +797,44 @@ namespace Robomongo
         R_EVENT
 
     public:
-        CreateFunctionRequest(QObject *sender, const std::string &database, const MongoFunction &function,
-                              const std::string &existingFunctionName = std::string(), bool overwrite = false) :
+        CreateFunctionRequest(QObject *sender, const std::string &database, float dbVersion, 
+                              const MongoFunction &function, const std::string &existingFunctionName = std::string(), 
+                              bool overwrite = false) :
             Event(sender),
             _database(database),
+            _dbVersion(dbVersion),
             _existingFunctionName(existingFunctionName),
             _function(function),
             _overwrite(overwrite) {}
 
         std::string database() const { return _database; }
+        float dbVersion() const { return _dbVersion; }
         std::string existingFunctionName() const { return _existingFunctionName; }
         MongoFunction function() const { return _function; }
         bool overwrite() const { return _overwrite; }
 
     private:
         std::string _database;
+        float const _dbVersion = 0.0f;
         std::string _existingFunctionName;
         MongoFunction _function;
         bool _overwrite;
     };
 
-    class CreateFunctionResponse : public Event
+    struct CreateFunctionResponse : public Event
     {
         R_EVENT
+        
+        enum Operation { NewFunction, NameUpdate, CodeUpdate }; // todo
 
-    public:
-        CreateFunctionResponse(QObject *sender) :
-            Event(sender) {}
+        CreateFunctionResponse(QObject *sender, std::string const& functionName) :
+            Event(sender), functionName(functionName) {}
 
-        CreateFunctionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        CreateFunctionResponse(QObject *sender, std::string const& functionName, const EventError &error) :
+            Event(sender, error), functionName(functionName) {}
+
+        std::string const functionName;
     };
-
 
     /**
      * @brief Drop Function
@@ -722,29 +845,34 @@ namespace Robomongo
         R_EVENT
 
     public:
-        DropFunctionRequest(QObject *sender, const std::string &database, const std::string &name) :
+        DropFunctionRequest(QObject *sender, const std::string &database, float dbVersion, 
+                            const std::string &funcName) :
             Event(sender),
             _database(database),
-            _name(name) {}
+            _dbVersion(dbVersion),
+            _functionName(funcName) {}
 
         std::string database() const { return _database; }
-        std::string name() const { return _name; }
+        float dbVersion() const { return _dbVersion; }
+        std::string functionName() const { return _functionName; }
 
     private:
         std::string _database;
-        std::string _name;
+        float const _dbVersion = 0.0f;
+        std::string _functionName;
     };
 
-    class DropFunctionResponse : public Event
+    struct DropFunctionResponse : public Event
     {
         R_EVENT
 
-    public:
-        DropFunctionResponse(QObject *sender) :
-            Event(sender) {}
+        DropFunctionResponse(QObject *sender, const std::string &functionName) :
+        Event(sender), functionName(functionName) {}
 
-        DropFunctionResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        DropFunctionResponse(QObject *sender, const std::string &functionName, const EventError &error) :
+            Event(sender, error), functionName(functionName) {}
+
+        std::string const functionName;
     };
 
     /**
@@ -804,10 +932,13 @@ namespace Robomongo
     {
         R_EVENT
 
-        AutocompleteResponse(QObject *sender,const QStringList &list, const std::string &prefix) :
+        AutocompleteResponse(QObject *sender, const QStringList &list, const std::string &prefix) :
             Event(sender),
             list(list),
             prefix(prefix) {}
+
+        AutocompleteResponse(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
 
         QStringList list;
         std::string prefix;
@@ -822,44 +953,47 @@ namespace Robomongo
     {
         R_EVENT
 
-        ExecuteScriptRequest(QObject *sender, const std::string &script, const std::string &dbName, int take = 0, int skip = 0) :
+        ExecuteScriptRequest(QObject *sender, const std::string &script, const std::string &dbName, 
+                             AggrInfo aggrInfo = AggrInfo(), int take = 0, int skip = 0) :
             Event(sender),
             script(script),
             databaseName(dbName),
+            aggrInfo(aggrInfo),
             take(take),
-            skip(skip) {}
+            skip(skip)
+            {}
 
         std::string script;
         std::string databaseName;
         int take; //
         int skip;
+        AggrInfo const aggrInfo;
     };
 
     class ExecuteScriptResponse : public Event
     {
         R_EVENT
 
-        ExecuteScriptResponse(QObject *sender, const MongoShellExecResult &result, bool empty) :
-            Event(sender),
-            result(result),
-            empty(empty) { }
+        ExecuteScriptResponse(QObject *sender, const MongoShellExecResult &result, bool empty,
+                              bool timeoutReached = false) :
+            Event(sender), result(result), empty(empty), _timeoutReached(timeoutReached) {}
 
-        ExecuteScriptResponse(QObject *sender, const EventError &error) :
-            Event(sender, error) {}
+        ExecuteScriptResponse(QObject *sender, const EventError &error, bool timeoutReached = false) :
+            Event(sender, error), _timeoutReached(timeoutReached) {}
+
+        bool timeoutReached() const { return _timeoutReached; }
 
         MongoShellExecResult result;
         bool empty;
+        bool const _timeoutReached = false;
     };
 
     class ConnectingEvent : public Event
     {
         R_EVENT
 
-        ConnectingEvent(QObject *sender, MongoServer *server) :
-            Event(sender),
-            server(server) { }
-
-        MongoServer *server;
+        ConnectingEvent(QObject *sender) :
+            Event(sender) { }
     };
 
     class OpeningShellEvent : public Event
@@ -877,28 +1011,43 @@ namespace Robomongo
     {
         R_EVENT
 
-        ConnectionFailedEvent(MongoServer *server) :
-            Event((QObject *)server),
-            server(server) { }
+        enum Reason {
+            MongoConnection    = 1,
+            MongoAuth          = 2,
+            SshConnection      = 3,
+            SshChannel         = 4,
+            SslConnection      = 5
+        };
 
-        ConnectionFailedEvent(MongoServer *server, const EventError &error) :
-            Event((QObject *)server, error),
-            server(server) {}
+        ConnectionFailedEvent(QObject *sender, int serverHandle, ConnectionType connectionType,
+                              const std::string& message, Reason reason) :
+            Event(sender),
+            message(message),
+            reason(reason),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
 
-        MongoServer *server;
+        std::string message;
+        Reason reason;
+        ConnectionType connectionType;
+        int serverHandle;
     };
 
 //    class ScriptExecute
 
-    class ConnectionEstablishedEvent : public Event
+    struct ConnectionEstablishedEvent : public Event
     {
         R_EVENT
 
-        ConnectionEstablishedEvent(MongoServer *server) :
+        ConnectionEstablishedEvent(MongoServer *server, ConnectionType type, ConnectionInfo connInfo) :
             Event((QObject *)server),
-            server(server) { }
+            server(server),
+            connectionType(type),
+            connInfo(connInfo) { }       
 
         MongoServer *server;
+        ConnectionType const connectionType;
+        ConnectionInfo const connInfo;
     };
 
     class DatabaseListLoadedEvent : public Event
@@ -908,6 +1057,9 @@ namespace Robomongo
         DatabaseListLoadedEvent(QObject *sender, const QList<MongoDatabase *> &list) :
             Event(sender),
             list(list) { }
+
+        DatabaseListLoadedEvent(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
 
         QList<MongoDatabase *> list;
     };
@@ -923,6 +1075,9 @@ namespace Robomongo
             _queryInfo(queryInfo),
             _query(query),
             _documents(docs) { }
+
+        DocumentListLoadedEvent(QObject *sender, const EventError &error) :
+            Event(sender, error) {}
 
         int resultIndex() const { return _resultIndex; }
         MongoQueryInfo queryInfo() const { return _queryInfo; }
@@ -941,17 +1096,21 @@ namespace Robomongo
         R_EVENT
 
     public:
-        ScriptExecutedEvent(QObject *sender, const MongoShellExecResult &result, bool empty) :
-            Event(sender),
-            _result(result),
-            _empty(empty) { }
+        ScriptExecutedEvent(QObject *sender, const MongoShellExecResult &result, bool empty,
+                            bool timeoutReached = false) :
+            Event(sender), _result(result), _empty(empty), _timeoutReached(timeoutReached) {}
+
+        ScriptExecutedEvent(QObject *sender, const EventError &error, bool timeoutReached = false) :
+            Event(sender, error), _timeoutReached(timeoutReached) {}
 
         MongoShellExecResult result() const { return _result; }
         bool empty() const { return _empty; }
+        bool timeoutReached() const { return _timeoutReached; }
 
     private:
         MongoShellExecResult _result;
         bool _empty;
+        bool const _timeoutReached = false;
     };
 
     class ScriptExecutingEvent : public Event
@@ -961,6 +1120,20 @@ namespace Robomongo
     public:
         ScriptExecutingEvent(QObject *sender) :
             Event(sender) { }
+    };
+
+    class OperationFailedEvent : public Event
+    {
+        R_EVENT
+
+    public:
+        OperationFailedEvent(QObject *sender, const std::string &technicalErrorMessage, const std::string &userFriendlyErrorMessage) :
+            technicalErrorMessage(technicalErrorMessage),
+            userFriendlyErrorMessage(userFriendlyErrorMessage),
+            Event(sender) { }
+
+        std::string technicalErrorMessage;
+        std::string userFriendlyErrorMessage;
     };
 
     class QueryWidgetUpdatedEvent : public Event
@@ -976,5 +1149,118 @@ namespace Robomongo
 
     private:
         int _numOfResults;
+    };
+
+    /**
+     * @brief Establish SSH Connection
+     */
+
+    class EstablishSshConnectionRequest : public Event
+    {
+    R_EVENT
+
+        EstablishSshConnectionRequest(QObject *sender, int serverHandle, SshTunnelWorker* worker, ConnectionSettings* settings, ConnectionType connectionType) :
+            Event(sender),
+            worker(worker),
+            settings(settings),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
+
+        ConnectionSettings* settings;
+        ConnectionType connectionType;
+        SshTunnelWorker* worker;
+        int serverHandle;
+    };
+
+    class EstablishSshConnectionResponse : public Event
+    {
+    R_EVENT
+
+        EstablishSshConnectionResponse(QObject *sender, int serverHandle, SshTunnelWorker* worker, ConnectionSettings* settings, ConnectionType connectionType, int localport) :
+            Event(sender),
+            worker(worker),
+            settings(settings),
+            connectionType(connectionType),
+            serverHandle(serverHandle),
+            localport(localport) {}
+
+        EstablishSshConnectionResponse(QObject *sender, int serverHandle, const EventError &error, SshTunnelWorker* worker, ConnectionSettings* settings, ConnectionType connectionType) :
+            Event(sender, error),
+            worker(worker),
+            settings(settings),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
+
+        ConnectionSettings* settings;
+        ConnectionType connectionType;
+        SshTunnelWorker* worker;
+        int localport;
+        int serverHandle;
+    };
+
+    /**
+     * @brief Start listening on all opened sockets (SSH tunnel)
+     */
+
+    class ListenSshConnectionRequest : public Event
+    {
+    R_EVENT
+
+        ListenSshConnectionRequest(QObject *sender, int serverHandle, ConnectionType connectionType) :
+            Event(sender),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
+
+        ConnectionType connectionType;
+        int serverHandle;
+    };
+
+    class ListenSshConnectionResponse : public Event
+    {
+    R_EVENT
+
+        ListenSshConnectionResponse(QObject *sender, int serverHandle, ConnectionSettings* settings, ConnectionType connectionType) :
+            Event(sender),
+            settings(settings),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
+
+        ListenSshConnectionResponse(QObject *sender, const EventError &error, int serverHandle, ConnectionSettings* settings, ConnectionType connectionType) :
+            Event(sender, error),
+            settings(settings),
+            serverHandle(serverHandle),
+            connectionType(connectionType) {}
+
+        ConnectionSettings* settings;
+        ConnectionType connectionType;
+        int serverHandle;
+    };
+
+    class LogEvent : public Event
+    {
+    R_EVENT
+
+        enum LogLevel {
+            RBM_ERROR  = 1,
+            RBM_WARN   = 2,
+            RBM_INFO   = 3,
+            RBM_DEBUG  = 100 // log as much as possible
+        };
+
+        LogEvent(QObject *sender, const std::string& message, LogLevel level) :
+            Event(sender),
+            message(message),
+            level(level) {}
+
+        std::string message;
+        LogLevel level;
+    };
+
+    class StopScriptRequest : public Event
+    {
+    R_EVENT
+
+        StopScriptRequest(QObject *sender) :
+            Event(sender) {}
     };
 }

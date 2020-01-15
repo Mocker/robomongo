@@ -1,6 +1,8 @@
 #include "robomongo/gui/widgets/workarea/WorkAreaTabBar.h"
 
 #include <QMouseEvent>
+#include <QTabWidget>
+#include <QScrollArea>
 
 namespace Robomongo
 {
@@ -13,13 +15,9 @@ namespace Robomongo
         : QTabBar(parent)
     {
         setDrawBase(false);
-
-    #if !defined(Q_OS_MAC)
         setStyleSheet(buildStyleSheet());
-    #endif
 
         _menu = new QMenu(this);
-
         _newShellAction = new QAction("&New Shell", _menu);
         _newShellAction->setShortcut(QKeySequence(QKeySequence::AddTab));
         _reloadShellAction = new QAction("&Re-execute Query", _menu);
@@ -40,7 +38,6 @@ namespace Robomongo
         _menu->addAction(_closeShellAction);
         _menu->addAction(_closeOtherShellsAction);
         _menu->addAction(_closeShellsToTheRightAction);
-
     }
 
     /**
@@ -96,6 +93,12 @@ namespace Robomongo
         if (tabIndex < 0)
             return;
 
+        // If this is a Welcome tab, do not show right click menu. 
+        // Note: Scroll area represents a WelcomeTab.
+        auto tabWidget = qobject_cast<QTabWidget*>(parentWidget());
+        if (qobject_cast<QScrollArea*>(tabWidget->widget(tabIndex)))
+            return;
+
         QAction *selected = _menu->exec(QCursor::pos());
         if (!selected)
             return;
@@ -134,9 +137,9 @@ namespace Robomongo
     QString WorkAreaTabBar::buildStyleSheet()
     {
         QColor background = palette().window().color();
-        QColor gradientZero = QColor("#ffffff");//Qt::white;//.lighter(103);
-        QColor gradientOne =  background.lighter(104);//Qt::white;//.lighter(103);
-        QColor gradientTwo =  background.lighter(108);//.lighter(103);
+        QColor gradientZero = QColor("#ffffff"); //Qt::white;//.lighter(103);
+        QColor gradientOne =  background.lighter(104); //Qt::white;//.lighter(103);
+        QColor gradientTwo =  background.lighter(108); //.lighter(103);
         QColor selectedBorder = background.darker(103);
 
         QString aga1 = gradientOne.name();
@@ -144,14 +147,20 @@ namespace Robomongo
         QString aga3 = background.name();
 
         QString styles = QString(
+            #ifndef __APPLE__
             "QTabBar::tab:first {"
                 "margin-left: 4px;"
             "}  "
             "QTabBar::tab:last {"
                 "margin-right: 1px;"
             "}  "
+            #endif
             "QTabBar::close-button { "
+            #ifdef __APPLE__           
+                "image: url(:/robomongo/icons/close_2_Mac_16x16.png);"                
+            #else      
                 "image: url(:/robomongo/icons/close_2_16x16.png);"
+            #endif      
                 "width: 10px;"
                 "height: 10px;"
             "}"
@@ -168,18 +177,20 @@ namespace Robomongo
                 "border-bottom-color: #B8B7B6;" // #C2C7CB same as the pane color
                 "border-top-left-radius: 6px;"
                 "border-top-right-radius: 6px;"
-    //            "min-width: 8ex;"
-                "max-width: 200px;"
                 "padding: 4px 0px 5px 0px;"
+                #ifndef __APPLE__
+                "max-width: 200px;"
                 "margin: 0px;"
                 "margin-left: 1px;"
-                "margin-right: -3px;"  // it should be -(tab:first:margin-left + tab:last:margin-left) to fix incorrect text elidement
-            "}"
+                "margin-right: -3px;"  // it should be -(tab:first:margin-left + tab:last:margin-left) to fix incorrect text elidement                
+                #endif
+                "}"
 
             "QTabBar::tab:selected, QTabBar::tab:hover {"
-                "background: qlineargradient(x1: 0, y1: 1, x2: 0, y2: 0,"
+                "/* background: qlineargradient(x1: 0, y1: 1, x2: 0, y2: 0,"
                                             "stop: 0 %1, stop: 0.3 %2,"    //#fafafa, #f4f4f4
-                                            "stop: 0.6 %3, stop: 1.0 %4);" //#e7e7e7, #fafafa
+                                            "stop: 0.6 %3, stop: 1.0 %4); */" //#e7e7e7, #fafafa
+                "background-color: white;"
             "}"
 
             "QTabBar::tab:selected {"
@@ -190,7 +201,9 @@ namespace Robomongo
             "QTabBar::tab:!selected {"
                 "margin-top: 2px;" // make non-selected tabs look smaller
             "}  "
+            #ifndef __APPLE__
             "QTabBar::tab:only-one { margin-top: 2px; margin-left:4px; }"
+            #endif
         ).arg(gradientZero.name(), gradientOne.name(), gradientTwo.name(), "#ffffff");
 
         QString aga = palette().window().color().name();

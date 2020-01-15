@@ -62,10 +62,11 @@ namespace
 
 namespace Robomongo
 {
-    ScriptInfo::ScriptInfo(const QString &script, bool execute,const CursorPosition &position,
-                           const QString &title, const QString &filePath) :
+    ScriptInfo::ScriptInfo(const QString &script, bool execute, const std::string &dbname, 
+                           const CursorPosition &position, const QString &title, const QString &filePath) :
         _script(script),
         _execute(execute),
+        _dbname(dbname),
         _title(title),
         _cursor(position),
         _filePath(filePath) {}
@@ -73,10 +74,10 @@ namespace Robomongo
     bool ScriptInfo::loadFromFile(const QString &filePath)
     {
         bool result = false;
-        QString filepath = QFileDialog::getOpenFileName(QApplication::activeWindow(), filePath,QString(), filterForScripts);
+        QString filepath = QFileDialog::getOpenFileName(QApplication::activeWindow(), filePath, QString(), filterForScripts);
         if (!filepath.isEmpty()) {
             QString out;
-            if (loadFromFileText(filepath,out)) {
+            if (loadFromFileText(filepath, out)) {
                 _script = out;
                 _filePath = filepath;
                 result = true;
@@ -95,7 +96,7 @@ namespace Robomongo
         QString filepath = QFileDialog::getSaveFileName(QApplication::activeWindow(),
             QObject::tr("Save As"), _filePath, filterForScripts);
 
-        if (saveToFileText(filepath,_script)) {
+        if (saveToFileText(filepath, _script)) {
             _filePath = filepath;
             return true;
         }

@@ -10,7 +10,7 @@ namespace Robomongo
     class ConnectionAuthTab;
     class ConnectionBasicTab;
     class ConnectionAdvancedTab;
-    class ConnectionSslTab;
+    class SSLTab;
     class SshTunnelTab;
     /**
      * @brief This Dialog allows to edit single connection
@@ -24,7 +24,11 @@ namespace Robomongo
          * @brief Constructs dialog with specified connection
          */
         ConnectionDialog(ConnectionSettings *connection);
+        
         ConnectionSettings *const connection() const { return _connection; }        
+        void setAuthTab(QString const& db, QString const& username, QString const& pwd);
+        void enableSslBasic();
+        void setDefaultDb(QString const& defaultDb);
 
     public Q_SLOTS:
         /**
@@ -43,7 +47,8 @@ namespace Robomongo
         ConnectionAuthTab *_authTab;
         ConnectionBasicTab *_basicTab;
         ConnectionAdvancedTab *_advancedTab;
-        ConnectionSslTab *_sslTab;
+        SshTunnelTab *_sshTab;
+        SSLTab *_sslTab;
 
 #ifdef SSH_SUPPORT_ENABLED
         SshTunnelTab *_sshTab;

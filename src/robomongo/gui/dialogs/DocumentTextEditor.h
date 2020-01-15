@@ -28,15 +28,33 @@ namespace Robomongo
         void setCursorPosition(int line, int column);
 
     public Q_SLOTS:
-        virtual void accept();
+        void accept() override;
+        void reject() override;
         bool validate(bool silentOnSuccess = true);
 
     private Q_SLOTS:
         void onQueryTextChanged();
         void onValidateButtonClicked();
 
+    protected:
+        /**
+        * @brief Reimplementing closeEvent in order to do some pre-close actions.
+        */
+        void closeEvent(QCloseEvent *event) override;
+
     private:
         void _configureQueryText();
+
+        /**
+        * @brief Restore window settings from system registry
+        */
+        void restoreWindowSettings();
+
+        /**
+        * @brief Save window settings into system registry
+        */
+        void saveWindowSettings() const;
+
         const CollectionInfo _info;
         FindFrame *_queryText;
         bool _readonly;

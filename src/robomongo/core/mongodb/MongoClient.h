@@ -1,6 +1,8 @@
 #pragma once
 
 #include <mongo/client/dbclientinterface.h>
+#include <mongo/bson/bsonobj.h>
+
 #include "robomongo/core/Core.h"
 #include "robomongo/core/domain/MongoQueryInfo.h"
 #include "robomongo/core/domain/MongoUser.h"
@@ -12,15 +14,17 @@ namespace Robomongo
     class MongoClient
     {
     public:
-        MongoClient(mongo::DBClientConnection *const scopedConnection);
+        MongoClient(mongo::DBClientBase *const scopedConnection);
 
-        std::vector<std::string> getCollectionNames(const std::string &dbname) const;
+        std::vector<std::string> getCollectionNamesWithDbname(const std::string &dbname) const;
         std::vector<std::string> getDatabaseNames() const;
         float getVersion() const;
+        std::string dbVersionStr() const;
+        std::string getStorageEngineType() const;
 
         std::vector<MongoUser> getUsers(const std::string &dbName);
-        void createUser(const std::string &dbName, const MongoUser &user, bool overwrite);
-        void dropUser(const std::string &dbName, const mongo::OID &id);
+        void createUser(const std::string &dbName, const MongoUser &user);
+        void dropUser(const std::string &dbName, const std::string &user);
 
         std::vector<MongoFunction> getFunctions(const std::string &dbName);
         std::vector<EnsureIndexInfo> getIndexes(const MongoCollectionInfo &collection) const;
@@ -37,15 +41,15 @@ namespace Robomongo
         void createDatabase(const std::string &dbName);
         void dropDatabase(const std::string &dbName);
 
-        void createCollection(const MongoNamespace &ns);
+        void createCollection(const std::string &ns, long long size, bool capped, int max, const mongo::BSONObj& extraOptions, mongo::BSONObj* info = nullptr);
         void renameCollection(const MongoNamespace &ns, const std::string &newCollectionName);
         void duplicateCollection(const MongoNamespace &ns, const std::string &newCollectionName);
         void dropCollection(const MongoNamespace &ns);
-        void copyCollectionToDiffServer(mongo::DBClientConnection *const,const MongoNamespace &from, const MongoNamespace &to);
+        void copyCollectionToDiffServer(mongo::DBClientBase *const, const MongoNamespace &from, const MongoNamespace &to);
 
-        void insertDocument(const mongo::BSONObj &obj, const MongoNamespace &ns);
-        void saveDocument(const mongo::BSONObj &obj, const MongoNamespace &ns);
-        void removeDocuments(const MongoNamespace &ns, mongo::Query query, bool justOne = true);
+        void insertDocument(const mongo::BSONObj &obj, const MongoNamespace &ns, bool const replicaSetConnectionWithAuth);
+        void saveDocument(const mongo::BSONObj &obj, const MongoNamespace &ns, bool const replicaSetConnectionWithAuth);
+        void removeDocuments(const MongoNamespace &ns, mongo::Query query, bool const replicaSetConnectionWithAuth, bool justOne = true);
         std::vector<MongoDocumentPtr> query(const MongoQueryInfo &info);
 
         MongoCollectionInfo runCollStatsCommand(const std::string &ns);
@@ -54,6 +58,7 @@ namespace Robomongo
         void done();
 
     private:
-        mongo::DBClientConnection *const _dbclient;
+        mongo::DBClientBase *const _dbclient;
+        void checkLastErrorAndThrow(const std::string &db);
     };
 }

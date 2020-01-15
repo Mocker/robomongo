@@ -22,9 +22,9 @@ namespace Robomongo
     {
         setWindowIcon(GuiRegistry::instance().mainWindowIcon());
 
-        setWindowTitle("Preferences "PROJECT_NAME_TITLE);
+        setWindowTitle("Preferences " PROJECT_NAME_TITLE);
         setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
-        setFixedSize(height,width);
+        setFixedSize(height, width);
 
         QVBoxLayout *layout = new QVBoxLayout(this);
 
@@ -33,7 +33,7 @@ namespace Robomongo
         defLayout->addWidget(defDisplayModeLabel);
         _defDisplayModeComboBox = new QComboBox();
         QStringList modes;
-        for (int i = Text;i<=Custom;++i)
+        for (int i = Text; i <= Custom; ++i)
         {
             modes.append(convertViewModeToString(static_cast<ViewMode>(i)));
         }
@@ -46,7 +46,7 @@ namespace Robomongo
         timeZoneLayout->addWidget(timeZoneLabel);
         _timeZoneComboBox = new QComboBox();
         QStringList times;
-        for (int i = Utc;i<=LocalTime;++i)
+        for (int i = Utc; i <= LocalTime; ++i)
         {
             times.append(convertTimesToString(static_cast<SupportedTimes>(i)));
         }
@@ -59,7 +59,7 @@ namespace Robomongo
         uuidEncodingLayout->addWidget(uuidEncodingLabel);
         _uuidEncodingComboBox = new QComboBox();
         QStringList uuids;
-        for (int i = DefaultEncoding;i<=PythonLegacy;++i)
+        for (int i = DefaultEncoding; i <= PythonLegacy; ++i)
         {
             uuids.append(convertUUIDEncodingToString(static_cast<UUIDEncoding>(i)));
         }
@@ -77,7 +77,7 @@ namespace Robomongo
         QLabel *stylesLabel = new QLabel("Styles:");
         stylesLayout->addWidget(stylesLabel);
         _stylesComboBox = new QComboBox();
-        _stylesComboBox->addItems(detail::getSupportedStyles());
+        _stylesComboBox->addItems(AppStyleUtils::getSupportedStyles());
         stylesLayout->addWidget(_stylesComboBox);
         layout->addLayout(stylesLayout);   
 
@@ -117,7 +117,7 @@ namespace Robomongo
         AppRegistry::instance().settingsManager()->setLoadMongoRcJs(_loadMongoRcJsCheckBox->isChecked());
         AppRegistry::instance().settingsManager()->setDisableConnectionShortcuts(_disabelConnectionShortcutsCheckBox->isChecked());
         Robomongo::AppRegistry::instance().settingsManager()->setCurrentStyle(_stylesComboBox->currentText());
-        detail::applyStyle(_stylesComboBox->currentText());
+        AppStyleUtils::applyStyle(_stylesComboBox->currentText());
         Robomongo::AppRegistry::instance().settingsManager()->save();
 
         return BaseClass::accept();

@@ -2,63 +2,118 @@
 
 #include <stdio.h>
 
+#include <QUuid>
+
 #include "robomongo/core/settings/CredentialSettings.h"
+#include "robomongo/core/settings/ReplicaSetSettings.h"
+#include "robomongo/core/settings/SshSettings.h"
+#include "robomongo/core/settings/SslSettings.h"
 #include "robomongo/core/utils/QtUtils.h"
+
+#include <boost/algorithm/string.hpp>
 
 namespace
 {
     const unsigned port = 27017;
     const char *defaultServerHost = "localhost";
     const char *defaultNameConnection = "New Connection";
+
+    const int maxLength = 300;
 }
 
 namespace Robomongo
 {
-
     /**
-     * @brief Creates ConnectionSettings with default values
+     * Creates ConnectionSettings with default values
      */
-    ConnectionSettings::ConnectionSettings() : QObject(),
-         _connectionName(defaultNameConnection),
-        _info(defaultServerHost,port)
-    {
+    ConnectionSettings::ConnectionSettings(bool isClone) : QObject(),
+        _connectionName(defaultNameConnection),
+        _host(defaultServerHost),
+        _port(port),
+        _imported(false),
+        _sshSettings(new SshSettings()),
+        _sslSettings(new SslSettings()),
+        _isReplicaSet(false),
+        _replicaSetSettings(new ReplicaSetSettings()),
+        _clone(isClone)
+    { }
 
+    ConnectionSettings::ConnectionSettings(const mongo::MongoURI& uri, bool isClone)  
+        : _connectionName(defaultNameConnection),
+        _host(defaultServerHost),
+        _port(port),
+        _imported(false),
+        _sshSettings(new SshSettings()),
+        _sslSettings(new SslSettings()),
+        _isReplicaSet((uri.type() == mongo::ConnectionString::ConnectionType::SET)),
+        _replicaSetSettings(new ReplicaSetSettings(uri)),
+        _clone(isClone)
+    {
+        // Disabling unfinished feature : Export / Import to / from MongoURI
+        /*
+        if (!uri.getServers().empty()) {
+            _host = uri.getServers().front().host();
+            _port = uri.getServers().front().port();
+        }
+
+        auto str = std::string(uri.getOptions().getStringField("ssl"));
+        auto sslEnabled = ("true" == str);
+        if (sslEnabled) {
+            _sslSettings->enableSSL(true);
+            _sslSettings->setAllowInvalidCertificates(true);
+        }
+
+        auto credential = new CredentialSettings();
+        credential->setUserName(uri.getUser());
+        credential->setUserPassword(uri.getPassword());
+        credential->setDatabaseName(uri.getDatabase());
+        if (!credential->userName().empty() && !credential->userPassword().empty()) {   // todo:
+            credential->setEnabled(true);
+        }
+        addCredential(credential);
+        */
     }
 
-    ConnectionSettings::ConnectionSettings(QVariantMap map) : QObject(),
-        _connectionName(QtUtils::toStdString(map.value("connectionName").toString())),
-        _info( QtUtils::toStdString(map.value("serverHost").toString()), map.value("serverPort").toInt()
-#ifdef MONGO_SSL
-        ,SSLInfo(map.value("sslEnabled").toBool(),QtUtils::toStdString(map.value("sslPemKeyFile").toString()))
-#endif
-#ifdef SSH_SUPPORT_ENABLED
-        ,SSHInfo()
-#endif        
-        )
-        ,_defaultDatabase(QtUtils::toStdString(map.value("defaultDatabase").toString()))
-    {
-#ifdef SSH_SUPPORT_ENABLED
-        SSHInfo inf;
-        inf._hostName = QtUtils::toStdString(map.value("sshHost").toString());
-        inf._userName = QtUtils::toStdString(map.value("sshUserName").toString());
-        inf._port = map.value("sshPort").toInt();
-        inf._password = QtUtils::toStdString(map.value("sshUserPassword").toString());
-        inf._publicKey._publicKey = QtUtils::toStdString(map.value("sshPublicKey").toString());
-        inf._publicKey._privateKey = QtUtils::toStdString(map.value("sshPrivateKey").toString());
-        inf._publicKey._passphrase = QtUtils::toStdString(map.value("sshPassphrase").toString());
-        inf._currentMethod = static_cast<SSHInfo::SupportedAuthenticationMetods>(map.value("sshAuthMethod").toInt());
-        setSshInfo(inf);
-#endif
+    void ConnectionSettings::fromVariant(const QVariantMap &map) {
+        setConnectionName(QtUtils::toStdString(map.value("connectionName").toString()));
+        setServerHost(QtUtils::toStdString(map.value("serverHost").toString().left(maxLength)));
+        setServerPort(map.value("serverPort").toInt());
+        setDefaultDatabase(QtUtils::toStdString(map.value("defaultDatabase").toString()));
+        setReplicaSet(map.value("isReplicaSet").toBool());       
+        
         QVariantList list = map.value("credentials").toList();
-        for(QVariantList::const_iterator it = list.begin(); it != list.end(); ++it) {
+        for (QVariantList::const_iterator it = list.begin(); it != list.end(); ++it) {
             QVariant var = *it;
             CredentialSettings *credential = new CredentialSettings(var.toMap());
             addCredential(credential);
         }
+
+        if (map.contains("ssh")) {
+            _sshSettings->fromVariant(map.value("ssh").toMap());
+        }
+
+        if (map.contains("ssl")) {
+            _sslSettings->fromVariant(map.value("ssl").toMap());
+        }
+
+        if (isReplicaSet()) {
+            _replicaSetSettings->fromVariant(map.value("replicaSet").toMap());
+        }
+
+        // If UUID has never been created or is empty, create a new one. Otherwise load the existing.
+        if (!map.contains("uuid") || map.value("uuid").toString().isEmpty())
+            _uuid = QUuid::createUuid().toString();
+        else
+            _uuid = map.value("uuid").toString();
+
+
+//#ifdef MONGO_SSL
+//      ,SSLInfo(map.value("sslEnabled").toBool(),QtUtils::toStdString(map.value("sslPemKeyFile").toString()))
+//#endif
     }
 
     /**
-     * @brief Cleanup used resources
+     * Cleanup used resources
      */
     ConnectionSettings::~ConnectionSettings()
     {
@@ -66,17 +121,18 @@ namespace Robomongo
     }
 
     /**
-     * @brief Creates completely new ConnectionSettings by cloning this record.
+     * Creates completely new ConnectionSettings by cloning this record.
      */
     ConnectionSettings *ConnectionSettings::clone() const
     {
-        ConnectionSettings *record = new ConnectionSettings();
-        record->apply(this);
-        return record;
+        auto settings = new ConnectionSettings(true);
+        settings->setUuid(_uuid);
+        settings->apply(this);
+        return settings;
     }
 
     /**
-     * @brief Discards current state and applies state from 'source' ConnectionSettings.
+     * Discards current state and applies state from 'source' ConnectionSettings.
      */
     void ConnectionSettings::apply(const ConnectionSettings *source)
     {
@@ -84,15 +140,22 @@ namespace Robomongo
         setServerHost(source->serverHost());
         setServerPort(source->serverPort());
         setDefaultDatabase(source->defaultDatabase());
-        setSslInfo(source->sslInfo());
-#ifdef SSH_SUPPORT_ENABLED
-        setSshInfo(source->sshInfo());
-#endif
+        setImported(source->imported());
+        setReplicaSet(source->isReplicaSet());
+
         clearCredentials();
         QList<CredentialSettings *> cred = source->credentials();
         for (QList<CredentialSettings *>::iterator it = cred.begin(); it != cred.end(); ++it) {
             addCredential((*it)->clone());
         }
+
+        _sshSettings.reset(source->sshSettings()->clone());
+        _sslSettings.reset(source->sslSettings()->clone());
+        _replicaSetSettings.reset(source->_replicaSetSettings->clone());
+
+//#ifdef MONGO_SSL
+//        setSslInfo(source->sslInfo());
+//#endif
     }
 
     /**
@@ -105,36 +168,34 @@ namespace Robomongo
         map.insert("serverHost", QtUtils::toQString(serverHost()));
         map.insert("serverPort", serverPort());
         map.insert("defaultDatabase", QtUtils::toQString(defaultDatabase()));
+        map.insert("isReplicaSet", isReplicaSet());
+        if (isReplicaSet()) {
+            map.insert("replicaSet", _replicaSetSettings->toVariant());
+        }
+
 #ifdef MONGO_SSL
         SSLInfo infl = _info.sslInfo();
         map.insert("sslEnabled", infl._sslSupport);
         map.insert("sslPemKeyFile", QtUtils::toQString(infl._sslPEMKeyFile));
 #endif
-#ifdef SSH_SUPPORT_ENABLED
-        SSHInfo inf = _info.sshInfo();
-        map.insert("sshHost", QtUtils::toQString(inf._hostName));
-        map.insert("sshUserName", QtUtils::toQString(inf._userName));
-        map.insert("sshPort", inf._port);
-        map.insert("sshUserPassword", QtUtils::toQString(inf._password));
-        map.insert("sshPublicKey", QtUtils::toQString(inf._publicKey._publicKey));
-        map.insert("sshPrivateKey", QtUtils::toQString(inf._publicKey._privateKey));
-        map.insert("sshPassphrase", QtUtils::toQString(inf._publicKey._passphrase));
-        map.insert("sshAuthMethod", inf._currentMethod);
-#endif
         QVariantList list;
-        for(QList<CredentialSettings *>::const_iterator it = _credentials.begin(); it != _credentials.end(); ++it) {
+        for (QList<CredentialSettings *>::const_iterator it = _credentials.begin(); it != _credentials.end(); ++it) {
             CredentialSettings *credential = *it;
             list.append(credential->toVariant());
         }
         map.insert("credentials", list);
+
+        map.insert("ssh", _sshSettings->toVariant());
+        map.insert("ssl", _sslSettings->toVariant());
+        map.insert("uuid", _uuid); 
 
         return map;
     }
 
      CredentialSettings *ConnectionSettings::findCredential(const std::string &databaseName) const
      {
-         CredentialSettings *result = NULL;
-         for(QList<CredentialSettings *>::const_iterator it = _credentials.begin(); it != _credentials.end(); ++it) {
+         CredentialSettings *result = nullptr;
+         for (QList<CredentialSettings *>::const_iterator it = _credentials.begin(); it != _credentials.end(); ++it) {
              CredentialSettings *cred = *it;
              if (cred->databaseName() == databaseName) {
                  result = cred;
@@ -157,7 +218,7 @@ namespace Robomongo
      * @brief Checks whether this connection has primary credential
      * which is also enabled.
      */
-    bool ConnectionSettings::hasEnabledPrimaryCredential()
+    bool ConnectionSettings::hasEnabledPrimaryCredential() const
     {
         if (_credentials.count() == 0)
             return false;
@@ -166,12 +227,13 @@ namespace Robomongo
     }
 
     /**
-     * @brief Returns primary credential, or NULL if no credentials exists.
+     * @brief Returns primary credential
      */
-    CredentialSettings *ConnectionSettings::primaryCredential()
+    CredentialSettings *ConnectionSettings::primaryCredential() const
     {
-        if (_credentials.count() == 0)
-            return NULL;
+        if (_credentials.count() == 0) {
+            _credentials.append(new CredentialSettings());
+        }
 
         return _credentials.at(0);
     }
@@ -187,8 +249,26 @@ namespace Robomongo
 
     std::string ConnectionSettings::getFullAddress() const
     {
-        char buff[1024] = {0};
-        sprintf(buff, "%s:%u", _info.host().c_str(), _info.port());
-        return buff;
+        return hostAndPort().toString();
     }
+
+    mongo::HostAndPort ConnectionSettings::hostAndPort() const 
+    {
+        // If it doesn't look like IPv6 address,
+        // treat it like IPv4 or literal hostname
+        if (_host.find(':') == std::string::npos) {
+            return mongo::HostAndPort(_host, _port);
+        }
+
+        // The following code assumes, that it is IPv6 address
+        // If address contains square brackets ("["), remove them:
+        std::string hostCopy = _host;
+        if (_host.find('[') != std::string::npos) {
+            boost::erase_all(hostCopy, "[");
+            boost::erase_all(hostCopy, "]");
+        }
+
+        return mongo::HostAndPort(hostCopy, _port);
+    }
+
 }
